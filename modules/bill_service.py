@@ -127,7 +127,7 @@ class BillService:
         self.db.refresh(bill)
         return bill
 
-    def pay_bill(self, bill_id: int, payment_method: str) -> Optional[Bill]:
+    def pay_bill(self, bill_id: int, payment_method: str, member_id: int = None) -> Optional[Bill]:
         bill = self.get_bill(bill_id)
         if not bill:
             return None
@@ -143,6 +143,17 @@ class BillService:
                     discount_service.use_coupon(bd.coupon_id)
                 except:
                     pass
+
+        if payment_method == "会员卡" and member_id:
+            from modules.member_service import MemberService
+            member_service = MemberService(self.db)
+            member_service.consume(
+                member_id=member_id,
+                amount=bill.final_amount,
+                bill_id=bill.id,
+                description=f"账单 {bill.bill_no} 会员卡支付"
+            )
+            bill.member_id = member_id
 
         bill.is_paid = True
         bill.payment_method = payment_method
@@ -179,6 +190,56 @@ class BillService:
             "total_discount_amount": round(sum(b.discount_amount for b in bills), 2),
             "total_final_amount": round(sum(b.final_amount for b in bills), 2),
             "total_paid_amount": round(sum(b.final_amount for b in paid_bills), 2)
+        }
+
+    def get_statistics(self, start_date: date, end_date: date) -> dict:
+        bills = self.db.query(Bill).filter(
+            Bill.is_paid == True,
+            Bill.paid_at >= datetime.combine(start_date, datetime.min.time()),
+            Bill.paid_at <= datetime.combine(end_date, datetime.max.time())
+        ).all()
+
+        total_base = round(sum(b.base_amount for b in bills), 2)
+        total_discount = round(sum(b.discount_amount for b in bills), 2)
+        total_final = round(sum(b.final_amount for b in bills), 2)
+        total_hours = round(sum(b.total_hours or 0 for b in bills), 2)
+        bill_count = len(bills)
+        avg_per_bill = round(total_final / bill_count, 2) if bill_count > 0 else 0
+
+        by_payment = {}
+        for b in bills:
+            method = b.payment_method or "未知"
+            if method not in by_payment:
+                by_payment[method] = {"count": 0, "amount": 0.0, "hours": 0.0}
+            by_payment[method]["count"] += 1
+            by_payment[method]["amount"] = round(by_payment[method]["amount"] + b.final_amount, 2)
+            by_payment[method]["hours"] = round(by_payment[method]["hours"] + (b.total_hours or 0), 2)
+
+        by_date = {}
+        for b in bills:
+            d = b.paid_at.date() if b.paid_at else (b.created_at.date() if b.created_at else None)
+            if d is None:
+                continue
+            ds = d.isoformat()
+            if ds not in by_date:
+                by_date[ds] = {"count": 0, "base": 0.0, "discount": 0.0, "final": 0.0, "hours": 0.0}
+            by_date[ds]["count"] += 1
+            by_date[ds]["base"] = round(by_date[ds]["base"] + b.base_amount, 2)
+            by_date[ds]["discount"] = round(by_date[ds]["discount"] + b.discount_amount, 2)
+            by_date[ds]["final"] = round(by_date[ds]["final"] + b.final_amount, 2)
+            by_date[ds]["hours"] = round(by_date[ds]["hours"] + (b.total_hours or 0), 2)
+
+        return {
+            "start_date": start_date,
+            "end_date": end_date,
+            "bill_count": bill_count,
+            "total_base": total_base,
+            "total_discount": total_discount,
+            "total_final": total_final,
+            "total_hours": total_hours,
+            "avg_per_bill": avg_per_bill,
+            "by_payment": by_payment,
+            "by_date": by_date
         }
 
     def generate_print_content(self, bill_id: int) -> str:

@@ -36,6 +36,13 @@ class InspectionStatus(str, enum.Enum):
     REPAIRED = "已维修"
 
 
+class MemberLevel(str, enum.Enum):
+    NORMAL = "普通会员"
+    SILVER = "银卡会员"
+    GOLD = "金卡会员"
+    DIAMOND = "钻石会员"
+
+
 class MahjongTable(Base):
     __tablename__ = "mahjong_tables"
 
@@ -150,6 +157,7 @@ class Bill(Base):
     discount_amount = Column(Float, default=0)
     final_amount = Column(Float, nullable=False)
     payment_method = Column(String(50))
+    member_id = Column(Integer, ForeignKey("members.id"))
     is_paid = Column(Boolean, default=False)
     note = Column(Text)
     created_at = Column(DateTime)
@@ -194,3 +202,38 @@ class MachineInspection(Base):
     created_at = Column(DateTime)
 
     table = relationship("MahjongTable", back_populates="inspections")
+
+
+class Member(Base):
+    __tablename__ = "members"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    phone = Column(String(20), unique=True, nullable=False)
+    level = Column(Enum(MemberLevel), default=MemberLevel.NORMAL)
+    balance = Column(Float, default=0.0)
+    total_consumption = Column(Float, default=0.0)
+    visit_count = Column(Integer, default=0)
+    remark = Column(Text)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+
+    consumptions = relationship("MemberConsumption", back_populates="member")
+
+
+class MemberConsumption(Base):
+    __tablename__ = "member_consumptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    member_id = Column(Integer, ForeignKey("members.id"), nullable=False)
+    bill_id = Column(Integer, ForeignKey("bills.id"))
+    type = Column(String(20), nullable=False)
+    amount = Column(Float, nullable=False)
+    balance_before = Column(Float)
+    balance_after = Column(Float)
+    description = Column(String(200))
+    created_at = Column(DateTime)
+
+    member = relationship("Member", back_populates="consumptions")
+    bill = relationship("Bill")

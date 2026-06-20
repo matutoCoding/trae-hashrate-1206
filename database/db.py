@@ -25,5 +25,7 @@ def get_db():
 
 
 def init_db():
-    from database.models import MahjongTable, CycleRule, Booking, Coupon, DiscountOrderConfig, Bill, BillDiscount, MachineInspection
+    from database.models import (MahjongTable, CycleRule, Booking, Coupon,
+                                  DiscountOrderConfig, Bill, BillDiscount,
+                                  MachineInspection, Member, MemberConsumption)
     Base.metadata.create_all(bind=engine)

@@ -1,9 +1,10 @@
 from datetime import date, time, timedelta
 from sqlalchemy.orm import Session
 from database.db import get_db
-from database.models import CouponType, DiscountApplyOrder
+from database.models import CouponType, DiscountApplyOrder, MemberLevel
 from modules.table_service import TableService
 from modules.discount_service import DiscountService
+from modules.member_service import MemberService
 
 
 def init_sample_data(db: Session):
@@ -50,3 +51,20 @@ def init_sample_data(db: Session):
             allow_negative=False
         )
         print("已配置优惠计算规则：先折扣后满减，禁止负值")
+
+    member_service = MemberService(db)
+    members = member_service.get_all_members(only_active=False)
+    if not members:
+        sample_members = [
+            {"name": "王建国", "phone": "13800001001", "level": MemberLevel.DIAMOND, "balance": 2000.0, "remark": "老顾客，每周固定来打牌"},
+            {"name": "李美华", "phone": "13800001002", "level": MemberLevel.GOLD, "balance": 1000.0, "remark": "常客"},
+            {"name": "张伟", "phone": "13800001003", "level": MemberLevel.SILVER, "balance": 500.0, "remark": ""},
+            {"name": "刘芳", "phone": "13800001004", "level": MemberLevel.NORMAL, "balance": 200.0, "remark": "新会员"},
+            {"name": "陈明", "phone": "13800001005", "level": MemberLevel.GOLD, "balance": 800.0, "remark": "经常带朋友来"},
+        ]
+        for m in sample_members:
+            try:
+                member_service.create_member(**m)
+            except Exception:
+                pass
+        print(f"已创建 {len(sample_members)} 个会员")

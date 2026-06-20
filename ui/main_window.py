@@ -10,6 +10,7 @@ from ui.cycle_management import CycleManagementWidget
 from ui.discount_management import DiscountManagementWidget
 from ui.billing import BillingWidget
 from ui.inspection_management import InspectionManagementWidget
+from ui.member_management import MemberManagementWidget
 
 
 class MainWindow(QMainWindow):
@@ -93,7 +94,8 @@ class MainWindow(QMainWindow):
             ("🎲 麻将桌排期", "麻将桌建档、预订管理、入住退房"),
             ("📅 周期预订", "周期规则设定、批量生成预订"),
             ("🎁 优惠管理", "优惠券管理、计算规则配置"),
-            ("💰 账单管理", "账单生成、支付、打印"),
+            ("� 会员档案", "会员管理、充值、消费记录"),
+            ("� 账单管理", "账单生成、支付、营业统计"),
             ("🔧 设备点检", "麻将机点检、维修管理"),
         ]
 
@@ -171,12 +173,14 @@ class MainWindow(QMainWindow):
         self.table_widget = TableManagementWidget(self.db)
         self.cycle_widget = CycleManagementWidget(self.db)
         self.discount_widget = DiscountManagementWidget(self.db)
+        self.member_widget = MemberManagementWidget(self.db)
         self.billing_widget = BillingWidget(self.db)
         self.inspection_widget = InspectionManagementWidget(self.db)
 
         self.stacked_widget.addWidget(self.table_widget)
         self.stacked_widget.addWidget(self.cycle_widget)
         self.stacked_widget.addWidget(self.discount_widget)
+        self.stacked_widget.addWidget(self.member_widget)
         self.stacked_widget.addWidget(self.billing_widget)
         self.stacked_widget.addWidget(self.inspection_widget)
 
@@ -193,7 +197,8 @@ class MainWindow(QMainWindow):
             ("麻将桌排期", "麻将桌建档、预订管理、入住退房"),
             ("周期预订", "周期规则设定、批量生成预订"),
             ("优惠管理", "优惠券管理、计算规则配置"),
-            ("账单管理", "账单生成、支付、打印"),
+            ("会员档案", "会员管理、充值、消费记录"),
+            ("账单管理", "账单生成、支付、营业统计"),
             ("设备点检", "麻将机点检、维修管理"),
         ]
 

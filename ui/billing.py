@@ -1,15 +1,17 @@
-from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QTableWidgetItem,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidgetItem,
                                QPushButton, QLabel, QGroupBox, QSplitter,
                                QComboBox, QDateEdit, QLineEdit, QCheckBox,
                                QTextEdit, QListWidget, QListWidgetItem,
-                               QDoubleSpinBox, QSpinBox, QDialog, QInputDialog)
+                               QDoubleSpinBox, QSpinBox, QDialog, QInputDialog,
+                               QTabWidget, QFormLayout, QHeaderView)
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QColor, QBrush, QFont
 from ui.base_widget import BaseWidget, BaseDialog
 from modules.bill_service import BillService
 from modules.discount_service import DiscountService
-from database.models import CouponType
-from datetime import datetime, date
+from modules.member_service import MemberService
+from database.models import CouponType, MemberLevel
+from datetime import datetime, date, timedelta
 from datetime import date as py_date
 
 
@@ -20,10 +22,12 @@ class BillingDialog(BaseDialog):
         self.selected_coupons = []
         self.current_result = None
         self.created_bill = None
+        self.selected_member_id = None
         super().__init__("账单结算", parent)
         self.discount_service = DiscountService(db)
         self.bill_service = BillService(db)
-        self.resize(700, 650)
+        self.member_service = MemberService(db)
+        self.resize(750, 700)
         self._load_data()
 
     def init_dialog(self):
@@ -90,6 +94,7 @@ class BillingDialog(BaseDialog):
         self.result_text = QTextEdit()
         self.result_text.setReadOnly(True)
         self.result_text.setStyleSheet("font-family: Consolas, Monaco, monospace; font-size: 13px;")
+        self.result_text.setMaximumHeight(120)
         result_layout.addWidget(self.result_text)
 
         amount_layout = QHBoxLayout()
@@ -107,39 +112,49 @@ class BillingDialog(BaseDialog):
         main_layout.addWidget(result_group)
 
         pay_group = QGroupBox("支付信息")
-        pay_layout = QHBoxLayout(pay_group)
-        pay_layout.addWidget(QLabel("支付方式:"))
+        pay_layout = QFormLayout(pay_group)
+        pay_method_layout = QHBoxLayout()
         self.combo_payment = QComboBox()
         self.combo_payment.addItems(["现金", "微信支付", "支付宝", "银行卡", "会员卡", "其他"])
         self.combo_payment.setMinimumHeight(32)
-        pay_layout.addWidget(self.combo_payment)
-        pay_layout.addStretch()
+        self.combo_payment.currentTextChanged.connect(self.on_payment_method_changed)
+        pay_method_layout.addWidget(self.combo_payment)
+        pay_method_layout.addStretch()
+        pay_layout.addRow("支付方式:", pay_method_layout)
+
+        member_layout = QHBoxLayout()
+        self.combo_member = QComboBox()
+        self.combo_member.setMinimumHeight(32)
+        self.combo_member.setEnabled(False)
+        member_layout.addWidget(self.combo_member)
+        self.lbl_member_balance = QLabel("")
+        self.lbl_member_balance.setStyleSheet("color: #1976d2; font-weight: bold;")
+        member_layout.addWidget(self.lbl_member_balance)
+        pay_layout.addRow("选择会员:", member_layout)
+
         self.chk_print = QCheckBox("打印账单")
         self.chk_print.setChecked(True)
-        pay_layout.addWidget(self.chk_print)
+        pay_layout.addRow("", self.chk_print)
+
         main_layout.addWidget(pay_group)
 
         self.form_layout.addRow(main_layout)
 
     def _load_data(self):
         if not self.booking:
-            self.show_error("错误", "预订信息不存在")
             return
-
-        table = self.booking.table
-        if not table:
-            self.show_error("错误", "关联的麻将桌信息不存在")
-            return
-
-        self.lbl_table.setText(f"{table.table_number} - {table.name}")
-        self.lbl_customer.setText(self.booking.customer_name)
-        self.lbl_date.setText(str(self.booking.booking_date))
-        time_str = f"{self.booking.start_time.strftime('%H:%M')}-{self.booking.end_time.strftime('%H:%M')}"
-        self.lbl_time.setText(time_str)
-        self.lbl_hours.setText(f"{self.booking.total_hours:.1f} 小时")
-        self.lbl_base.setText(f"¥{self.booking.base_amount:.2f}")
 
         try:
+            table = self.booking.table
+            if table:
+                self.lbl_table.setText(f"{table.table_number} - {table.name}")
+            self.lbl_customer.setText(self.booking.customer_name or "")
+            self.lbl_date.setText(str(self.booking.booking_date))
+            time_str = f"{self.booking.start_time.strftime('%H:%M')}-{self.booking.end_time.strftime('%H:%M')}"
+            self.lbl_time.setText(time_str)
+            self.lbl_hours.setText(f"{self.booking.total_hours:.1f} 小时")
+            self.lbl_base.setText(f"¥{self.booking.base_amount:.2f}")
+
             coupons = self.discount_service.get_available_coupons(self.booking.base_amount)
             for coupon in coupons:
                 if coupon.type == CouponType.DISCOUNT:
@@ -149,10 +164,36 @@ class BillingDialog(BaseDialog):
                 item = QListWidgetItem(desc)
                 item.setData(Qt.UserRole, coupon.id)
                 self.list_available.addItem(item)
-        except Exception as e:
-            pass
 
-        self.calculate()
+            members = self.member_service.get_all_members(only_active=True)
+            for m in members:
+                self.combo_member.addItem(
+                    f"{m.name} ({m.phone}) 余额:¥{m.balance:.2f}",
+                    m.id
+                )
+
+            self.calculate()
+        except Exception as e:
+            self.result_text.setPlainText(f"加载出错: {str(e)}")
+
+    def on_payment_method_changed(self, method):
+        is_member = method == "会员卡"
+        self.combo_member.setEnabled(is_member)
+        if is_member:
+            self._update_member_balance()
+        else:
+            self.lbl_member_balance.setText("")
+
+    def _update_member_balance(self):
+        idx = self.combo_member.currentIndex()
+        if idx >= 0:
+            member_id = self.combo_member.itemData(idx)
+            if member_id:
+                member = self.member_service.get_member(member_id)
+                if member:
+                    self.lbl_member_balance.setText(f"余额: ¥{member.balance:.2f}")
+                    return
+        self.lbl_member_balance.setText("")
 
     def add_coupon(self):
         for item in self.list_available.selectedItems():
@@ -208,12 +249,6 @@ class BillingDialog(BaseDialog):
             self.result_text.setPlainText(f"计算出错: {str(e)}")
             self.current_result = None
 
-    def get_data(self):
-        return {
-            "payment_method": self.combo_payment.currentText(),
-            "print": self.chk_print.isChecked()
-        }
-
     def validate(self):
         if not self.booking:
             self.show_error("错误", "预订信息不存在")
@@ -221,6 +256,28 @@ class BillingDialog(BaseDialog):
         if not self.current_result:
             self.show_error("错误", "请先计算优惠金额")
             return False
+
+        if self.combo_payment.currentText() == "会员卡":
+            idx = self.combo_member.currentIndex()
+            if idx < 0:
+                self.show_error("错误", "请选择会员")
+                return False
+            member_id = self.combo_member.itemData(idx)
+            if not member_id:
+                self.show_error("错误", "请选择有效的会员")
+                return False
+            member = self.member_service.get_member(member_id)
+            if not member:
+                self.show_error("错误", "会员不存在")
+                return False
+            if member.balance < self.current_result.final_amount:
+                self.show_error("余额不足",
+                    f"会员「{member.name}」余额 ¥{member.balance:.2f}，"
+                    f"应付 ¥{self.current_result.final_amount:.2f}，"
+                    f"差额 ¥{self.current_result.final_amount - member.balance:.2f}\n"
+                    f"请先充值或更换支付方式！")
+                return False
+
         return True
 
     def accept(self):
@@ -233,14 +290,19 @@ class BillingDialog(BaseDialog):
                 discount_result=self.current_result
             )
 
-            data = self.get_data()
-            self.bill_service.pay_bill(bill.id, data["payment_method"])
+            payment_method = self.combo_payment.currentText()
+            member_id = None
+            if payment_method == "会员卡":
+                idx = self.combo_member.currentIndex()
+                member_id = self.combo_member.itemData(idx)
+
+            self.bill_service.pay_bill(bill.id, payment_method, member_id=member_id)
 
             self.created_bill = bill
 
-            if data["print"]:
-                print_content = self.bill_service.generate_print_content(bill.id)
+            if self.chk_print.isChecked():
                 try:
+                    print_content = self.bill_service.generate_print_content(bill.id)
                     from PySide6.QtPrintSupport import QPrinter, QPrintDialog
                     from PySide6.QtGui import QTextDocument
 
@@ -261,7 +323,6 @@ class BillingDialog(BaseDialog):
             super().accept()
         except Exception as e:
             self.show_error("错误", str(e))
-            return
 
 
 class BillingWidget(BaseWidget):
@@ -276,11 +337,32 @@ class BillingWidget(BaseWidget):
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        title = QLabel("📄 账单管理")
+        title = QLabel("� 账单与营业管理")
         title.setStyleSheet("font-size: 20px; font-weight: bold; color: #1976d2;")
         main_layout.addWidget(title)
 
-        splitter = QSplitter(Qt.Vertical)
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabBar::tab {
+                padding: 8px 20px;
+                font-size: 13px;
+            }
+            QTabBar::tab:selected {
+                background: white;
+                font-weight: bold;
+                color: #1976d2;
+            }
+        """)
+
+        self.tabs.addTab(self._create_bill_tab(), "📋 账单列表")
+        self.tabs.addTab(self._create_stats_tab(), "📊 营业统计")
+
+        main_layout.addWidget(self.tabs)
+
+    def _create_bill_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(8)
 
         filter_group = QGroupBox("查询条件")
         filter_layout = QHBoxLayout(filter_group)
@@ -301,26 +383,25 @@ class BillingWidget(BaseWidget):
         self.date_end.dateChanged.connect(self.refresh)
         filter_layout.addWidget(self.date_end)
 
-        self.chk_only_unpaid = QCheckBox("仅显示未支付")
+        self.chk_only_unpaid = QCheckBox("仅未支付")
         self.chk_only_unpaid.toggled.connect(self.refresh)
         filter_layout.addWidget(self.chk_only_unpaid)
 
         self.btn_refresh = self.create_button("🔄 刷新", callback=self.refresh)
         filter_layout.addWidget(self.btn_refresh)
-
         filter_layout.addStretch()
 
         self.lbl_stats = QLabel("")
         self.lbl_stats.setStyleSheet("font-weight: bold; color: #666;")
         filter_layout.addWidget(self.lbl_stats)
 
-        main_layout.addWidget(filter_group)
+        layout.addWidget(filter_group)
 
         bill_group = QGroupBox("账单列表")
         bill_layout = QVBoxLayout(bill_group)
 
         btn_layout = QHBoxLayout()
-        self.btn_view = self.create_button("👁️ 查看详情", callback=self.view_bill)
+        self.btn_view = self.create_button("👁️ 详情", callback=self.view_bill)
         self.btn_print = self.create_button("🖨️ 打印", callback=self.print_bill)
         self.btn_pay = self.create_button("💰 支付", callback=self.pay_bill)
         self.btn_delete = self.create_button("🗑️ 删除", callback=self.delete_bill)
@@ -336,20 +417,130 @@ class BillingWidget(BaseWidget):
         ])
         bill_layout.addWidget(self.bill_widget)
 
-        splitter.addWidget(bill_group)
-
-        detail_group = QGroupBox("账单详情")
-        detail_layout = QVBoxLayout(detail_group)
-        self.detail_text = QTextEdit()
-        self.detail_text.setReadOnly(True)
-        self.detail_text.setStyleSheet("font-family: Consolas, Monaco, monospace; font-size: 12px;")
-        detail_layout.addWidget(self.detail_text)
-        splitter.addWidget(detail_group)
-
-        splitter.setSizes([400, 250])
-        main_layout.addWidget(splitter)
+        layout.addWidget(bill_group)
 
         self.bill_widget.itemSelectionChanged.connect(self.on_bill_selected)
+
+        return tab
+
+    def _create_stats_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(8)
+
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("统计周期:"))
+        self.combo_period = QComboBox()
+        self.combo_period.addItems(["近7天", "近30天", "本月", "上月", "自定义"])
+        self.combo_period.currentTextChanged.connect(self.on_period_changed)
+        self.combo_period.setMinimumHeight(32)
+        filter_layout.addWidget(self.combo_period)
+
+        filter_layout.addWidget(QLabel("自定义:"))
+        self.stats_date_start = QDateEdit()
+        self.stats_date_start.setCalendarPopup(True)
+        self.stats_date_start.setDisplayFormat("yyyy-MM-dd")
+        self.stats_date_start.setDate(QDate.currentDate().addDays(-7))
+        filter_layout.addWidget(self.stats_date_start)
+        filter_layout.addWidget(QLabel("至"))
+        self.stats_date_end = QDateEdit()
+        self.stats_date_end.setCalendarPopup(True)
+        self.stats_date_end.setDisplayFormat("yyyy-MM-dd")
+        self.stats_date_end.setDate(QDate.currentDate())
+        filter_layout.addWidget(self.stats_date_end)
+
+        self.btn_stats = self.create_button("📊 生成统计", callback=self.generate_statistics)
+        filter_layout.addWidget(self.btn_stats)
+        filter_layout.addStretch()
+        layout.addLayout(filter_layout)
+
+        summary_group = QGroupBox("汇总数据")
+        summary_layout = QHBoxLayout(summary_group)
+        self.lbl_stat_bills = QLabel("账单数: 0")
+        self.lbl_stat_base = QLabel("营业额: ¥0")
+        self.lbl_stat_discount = QLabel("优惠额: ¥0")
+        self.lbl_stat_final = QLabel("实收额: ¥0")
+        self.lbl_stat_hours = QLabel("使用时长: 0h")
+        self.lbl_stat_avg = QLabel("客单价: ¥0")
+        for lbl in [self.lbl_stat_bills, self.lbl_stat_base, self.lbl_stat_discount,
+                     self.lbl_stat_final, self.lbl_stat_hours, self.lbl_stat_avg]:
+            lbl.setStyleSheet("font-size: 14px; font-weight: bold; padding: 8px; background: white; border-radius: 4px;")
+            summary_layout.addWidget(lbl)
+        layout.addWidget(summary_group)
+
+        stats_splitter = QSplitter(Qt.Horizontal)
+
+        daily_group = QGroupBox("每日明细")
+        daily_layout = QVBoxLayout(daily_group)
+        self.daily_table = self.create_table([
+            "日期", "账单数", "营业额", "优惠额", "实收额", "使用时长", "客单价"
+        ])
+        daily_layout.addWidget(self.daily_table)
+        stats_splitter.addWidget(daily_group)
+
+        payment_group = QGroupBox("按支付方式分组")
+        payment_layout = QVBoxLayout(payment_group)
+        self.payment_table = self.create_table([
+            "支付方式", "笔数", "金额", "时长", "占比"
+        ])
+        payment_layout.addWidget(self.payment_table)
+        stats_splitter.addWidget(payment_group)
+
+        stats_splitter.setSizes([500, 300])
+        layout.addWidget(stats_splitter)
+
+        return tab
+
+    def on_period_changed(self, text):
+        today = QDate.currentDate()
+        if text == "近7天":
+            self.stats_date_start.setDate(today.addDays(-6))
+            self.stats_date_end.setDate(today)
+        elif text == "近30天":
+            self.stats_date_start.setDate(today.addDays(-29))
+            self.stats_date_end.setDate(today)
+        elif text == "本月":
+            self.stats_date_start.setDate(QDate(today.year(), today.month(), 1))
+            self.stats_date_end.setDate(today)
+        elif text == "上月":
+            first_of_this = QDate(today.year(), today.month(), 1)
+            self.stats_date_start.setDate(first_of_this.addMonths(-1))
+            self.stats_date_end.setDate(first_of_this.addDays(-1))
+
+    def generate_statistics(self):
+        start_date = self.stats_date_start.date().toPython()
+        end_date = self.stats_date_end.date().toPython()
+
+        stats = self.bill_service.get_statistics(start_date, end_date)
+
+        self.lbl_stat_bills.setText(f"账单数: {stats['bill_count']}")
+        self.lbl_stat_base.setText(f"营业额: ¥{stats['total_base']:.2f}")
+        self.lbl_stat_discount.setText(f"优惠额: ¥{stats['total_discount']:.2f}")
+        self.lbl_stat_final.setText(f"实收额: ¥{stats['total_final']:.2f}")
+        self.lbl_stat_hours.setText(f"使用时长: {stats['total_hours']:.1f}h")
+        self.lbl_stat_avg.setText(f"客单价: ¥{stats['avg_per_bill']:.2f}")
+
+        self.clear_table(self.daily_table)
+        for ds in sorted(stats["by_date"].keys()):
+            d = stats["by_date"][ds]
+            avg = round(d["final"] / d["count"], 2) if d["count"] > 0 else 0
+            row = self.daily_table.rowCount()
+            self.daily_table.insertRow(row)
+            self.set_table_row(self.daily_table, row, [
+                ds, d["count"], f"¥{d['base']:.2f}", f"¥{d['discount']:.2f}",
+                f"¥{d['final']:.2f}", f"{d['hours']:.1f}h", f"¥{avg:.2f}"
+            ])
+
+        self.clear_table(self.payment_table)
+        total_amount = stats["total_final"] if stats["total_final"] > 0 else 1
+        for method, data in sorted(stats["by_payment"].items()):
+            pct = round(data["amount"] / total_amount * 100, 1)
+            row = self.payment_table.rowCount()
+            self.payment_table.insertRow(row)
+            self.set_table_row(self.payment_table, row, [
+                method, data["count"], f"¥{data['amount']:.2f}",
+                f"{data['hours']:.1f}h", f"{pct}%"
+            ])
 
     def refresh(self):
         self.refresh_bills()
@@ -398,11 +589,7 @@ class BillingWidget(BaseWidget):
         )
 
     def on_bill_selected(self):
-        bill_id = self.get_selected_bill_id()
-        self.detail_text.clear()
-        if bill_id:
-            content = self.bill_service.generate_print_content(bill_id)
-            self.detail_text.setPlainText(content)
+        pass
 
     def get_selected_bill_id(self):
         row = self.bill_widget.currentRow()
@@ -467,11 +654,33 @@ class BillingWidget(BaseWidget):
         payment_methods = ["现金", "微信支付", "支付宝", "银行卡", "会员卡", "其他"]
         method, ok = QInputDialog.getItem(self, "选择支付方式", "请选择支付方式:", payment_methods, 0, False)
         if ok:
-            if self.bill_service.pay_bill(bill_id, method):
+            try:
+                member_id = None
+                if method == "会员卡":
+                    member_service = MemberService(self.db)
+                    members = member_service.get_all_members(only_active=True)
+                    if not members:
+                        self.show_error("错误", "没有可用会员，请先在会员档案中添加会员")
+                        return
+                    member_names = [f"{m.name} ({m.phone}) 余额:¥{m.balance:.2f}" for m in members]
+                    member_choice, mok = QInputDialog.getItem(
+                        self, "选择会员", "请选择支付会员:", member_names, 0, False)
+                    if not mok:
+                        return
+                    idx = member_names.index(member_choice)
+                    member = members[idx]
+                    if member.balance < bill.final_amount:
+                        self.show_error("余额不足",
+                            f"会员「{member.name}」余额 ¥{member.balance:.2f}，"
+                            f"应付 ¥{bill.final_amount:.2f}，差额 ¥{bill.final_amount - member.balance:.2f}")
+                        return
+                    member_id = member.id
+
+                self.bill_service.pay_bill(bill_id, method, member_id=member_id)
                 self.show_info("成功", "支付成功")
                 self.refresh()
-            else:
-                self.show_error("错误", "支付失败")
+            except Exception as e:
+                self.show_error("错误", str(e))
 
     def delete_bill(self):
         bill_id = self.get_selected_bill_id()
