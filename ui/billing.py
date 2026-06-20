@@ -492,6 +492,19 @@ class BillingWidget(BaseWidget):
             summary_layout.addWidget(lbl)
         layout.addWidget(summary_group)
 
+        self.stats_tabs = QTabWidget()
+        self.stats_tabs.addTab(self._create_report_view(), "📋 报表视图")
+        self.stats_tabs.addTab(self._create_dashboard_view(), "📈 老板看板")
+        self.stats_tabs.currentChanged.connect(self.on_stats_tab_changed)
+        layout.addWidget(self.stats_tabs)
+
+        self.current_stats_data = None
+        self.current_analysis_data = None
+        return tab
+
+    def _create_report_view(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
         stats_splitter = QSplitter(Qt.Horizontal)
 
         daily_group = QGroupBox("周期明细")
@@ -512,9 +525,84 @@ class BillingWidget(BaseWidget):
 
         stats_splitter.setSizes([500, 300])
         layout.addWidget(stats_splitter)
-
-        self.current_stats_data = None
         return tab
+
+    def _create_dashboard_view(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(8)
+
+        kpi_group = QGroupBox("经营概览")
+        kpi_grid = QHBoxLayout(kpi_group)
+        self.dash_utilization = self._create_kpi_label("桌台利用率", "0%")
+        self.dash_member_ratio = self._create_kpi_label("会员消费占比", "0%")
+        self.dash_member_amount_ratio = self._create_kpi_label("会员金额占比", "0%")
+        self.dash_tables = self._create_kpi_label("桌台总数", "0张")
+        self.dash_days = self._create_kpi_label("统计天数", "0天")
+        self.dash_avg = self._create_kpi_label("客单价", "¥0")
+        for kpi in [self.dash_utilization, self.dash_member_ratio, self.dash_member_amount_ratio,
+                    self.dash_tables, self.dash_days, self.dash_avg]:
+            kpi_grid.addWidget(kpi)
+        layout.addWidget(kpi_group)
+
+        dash_splitter = QSplitter(Qt.Horizontal)
+
+        table_util_group = QGroupBox("桌台利用率明细")
+        table_util_layout = QVBoxLayout(table_util_group)
+        self.table_util_table = self.create_table([
+            "桌号", "消费次数", "营收", "使用时长", "利用率估算"
+        ])
+        table_util_layout.addWidget(self.table_util_table)
+        dash_splitter.addWidget(table_util_group)
+
+        right_col = QWidget()
+        right_layout = QVBoxLayout(right_col)
+
+        hour_group = QGroupBox("热门时段")
+        hour_layout = QVBoxLayout(hour_group)
+        self.hot_hour_table = self.create_table(["时段", "次数", "营收"])
+        hour_layout.addWidget(self.hot_hour_table)
+        right_layout.addWidget(hour_group)
+
+        discount_group = QGroupBox("优惠来源占比")
+        discount_layout = QVBoxLayout(discount_group)
+        self.discount_source_table = self.create_table(["优惠来源", "使用笔数", "优惠金额", "占比"])
+        discount_layout.addWidget(self.discount_source_table)
+        right_layout.addWidget(discount_group)
+
+        dash_splitter.addWidget(right_col)
+        dash_splitter.setSizes([450, 350])
+        layout.addWidget(dash_splitter)
+
+        return tab
+
+    def _create_kpi_label(self, title: str, value: str) -> QWidget:
+        box = QWidget()
+        box.setStyleSheet("background: white; border-radius: 6px; border: 1px solid #e0e0e0; padding: 4px;")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(10, 6, 10, 6)
+        lbl_title = QLabel(title)
+        lbl_title.setStyleSheet("font-size: 12px; color: #757575;")
+        lbl_value = QLabel(value)
+        lbl_value.setStyleSheet("font-size: 20px; font-weight: bold; color: #1976d2;")
+        v.addWidget(lbl_title)
+        v.addWidget(lbl_value)
+        return box
+
+    def _set_kpi_value(self, kpi_widget: QWidget, value: str, color: str = None):
+        lbl_value = None
+        for c in kpi_widget.findChildren(QLabel):
+            if c.styleSheet() and "font-size: 20px" in c.styleSheet():
+                lbl_value = c
+                break
+        if lbl_value:
+            if color:
+                lbl_value.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {color};")
+            lbl_value.setText(value)
+
+    def on_stats_tab_changed(self, idx):
+        if self.current_analysis_data and idx == 1:
+            self._render_dashboard()
 
     def on_view_mode_changed(self, text):
         if self.current_stats_data:
@@ -543,6 +631,13 @@ class BillingWidget(BaseWidget):
         stats = self.bill_service.get_statistics(start_date, end_date)
         self.current_stats_data = stats
 
+        try:
+            analysis = self.bill_service.get_business_analysis(start_date, end_date)
+            self.current_analysis_data = analysis
+        except Exception as e:
+            print(f"Warning: failed to get analysis: {e}")
+            self.current_analysis_data = None
+
         self.lbl_stat_bills.setText(f"账单数: {stats['bill_count']}")
         self.lbl_stat_base.setText(f"营业额: ¥{stats['total_base']:.2f}")
         self.lbl_stat_discount.setText(f"优惠额: ¥{stats['total_discount']:.2f}")
@@ -562,6 +657,67 @@ class BillingWidget(BaseWidget):
                 method, data["count"], f"¥{data['amount']:.2f}",
                 f"{data['hours']:.1f}h", f"{pct}%"
             ])
+
+        if self.current_analysis_data and self.stats_tabs.currentIndex() == 1:
+            self._render_dashboard()
+
+    def _render_dashboard(self):
+        data = self.current_analysis_data
+        if not data:
+            return
+
+        self._set_kpi_value(self.dash_utilization, f"{data['utilization']}%")
+        mem_color = "#4caf50" if data['member_ratio'] >= 50 else "#ff9800"
+        self._set_kpi_value(self.dash_member_ratio, f"{data['member_ratio']}%", mem_color)
+        self._set_kpi_value(self.dash_member_amount_ratio, f"{data['member_amount_ratio']}%")
+        self._set_kpi_value(self.dash_tables, f"{data['total_tables']}张")
+        self._set_kpi_value(self.dash_days, f"{data['date_range_days']}天")
+        self._set_kpi_value(self.dash_avg, f"¥{data['avg_per_bill']:.0f}")
+
+        self.clear_table(self.table_util_table)
+        by_table = data["by_table"]
+        possible_per_table = data["date_range_days"] * 12
+        for tn in sorted(by_table.keys()):
+            t = by_table[tn]
+            util_e = round(t["hours"] / possible_per_table * 100, 1) if possible_per_table > 0 else 0
+            row = self.table_util_table.rowCount()
+            self.table_util_table.insertRow(row)
+            self.set_table_row(self.table_util_table, row, [
+                tn, t["count"], f"¥{t['final']:.2f}", f"{t['hours']:.1f}h", f"{util_e}%"
+            ])
+            util_item = self.table_util_table.item(row, 4)
+            if util_e >= 70:
+                util_item.setForeground(QBrush(QColor("#4caf50")))
+            elif util_e >= 40:
+                util_item.setForeground(QBrush(QColor("#ff9800")))
+            else:
+                util_item.setForeground(QBrush(QColor("#9e9e9e")))
+
+        self.clear_table(self.hot_hour_table)
+        for i, hh in enumerate(data["hot_hours"]):
+            row = self.hot_hour_table.rowCount()
+            self.hot_hour_table.insertRow(row)
+            self.set_table_row(self.hot_hour_table, row, [
+                hh["hour_range"], hh["count"], f"¥{hh['amount']:.2f}"
+            ])
+            if i == 0:
+                self.hot_hour_table.item(row, 0).setForeground(QBrush(QColor("#f44336")))
+
+        self.clear_table(self.discount_source_table)
+        total_discount = sum(d["amount"] for d in data["by_discount_source"].values())
+        total_discount = total_discount if total_discount > 0 else 1
+        for src in ["会员折扣", "优惠券折扣"]:
+            d = data["by_discount_source"].get(src, {"count": 0, "amount": 0})
+            pct = round(d["amount"] / total_discount * 100, 1)
+            row = self.discount_source_table.rowCount()
+            self.discount_source_table.insertRow(row)
+            self.set_table_row(self.discount_source_table, row, [
+                src, d["count"], f"¥{d['amount']:.2f}", f"{pct}%"
+            ])
+            if src == "会员折扣":
+                self.discount_source_table.item(row, 0).setForeground(QBrush(QColor("#9c27b0")))
+            else:
+                self.discount_source_table.item(row, 0).setForeground(QBrush(QColor("#2196f3")))
 
     def _update_period_display(self):
         if not self.current_stats_data:
@@ -642,7 +798,6 @@ class BillingWidget(BaseWidget):
 
         try:
             from PySide6.QtWidgets import QFileDialog
-            import os
             from openpyxl import Workbook
             from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
@@ -654,10 +809,8 @@ class BillingWidget(BaseWidget):
                 return
 
             stats = self.current_stats_data
+            analysis = self.current_analysis_data
             wb = Workbook()
-
-            ws = wb.active
-            ws.title = "营业报表"
 
             header_font = Font(bold=True, size=12, color="FFFFFF")
             header_fill = PatternFill(start_color="1976D2", end_color="1976D2", fill_type="solid")
@@ -666,89 +819,86 @@ class BillingWidget(BaseWidget):
                 left=Side(style='thin'), right=Side(style='thin'),
                 top=Side(style='thin'), bottom=Side(style='thin')
             )
+            title_font = Font(bold=True, size=16)
+            period_font = Font(size=11, italic=True)
+            section_font = Font(bold=True, size=12)
 
-            ws.merge_cells('A1:G1')
-            ws['A1'] = "茶楼麻将房营业报表"
-            ws['A1'].font = Font(bold=True, size=16)
-            ws['A1'].alignment = center_align
-
-            ws['A2'] = f"统计周期: {stats['start_date']} 至 {stats['end_date']}"
-            ws.merge_cells('A2:G2')
-            ws['A2'].alignment = center_align
-
-            ws['A4'] = "汇总数据"
-            ws['A4'].font = Font(bold=True, size=12)
-
-            summary_labels = ["账单数", "营业额", "优惠额", "实收额", "使用时长", "客单价"]
-            summary_values = [
-                stats['bill_count'],
-                f"¥{stats['total_base']:.2f}",
-                f"¥{stats['total_discount']:.2f}",
-                f"¥{stats['total_final']:.2f}",
-                f"{stats['total_hours']:.1f} 小时",
-                f"¥{stats['avg_per_bill']:.2f}"
-            ]
-            for i, (label, value) in enumerate(zip(summary_labels, summary_values)):
-                ws.cell(row=5, column=i + 1, value=label)
-                ws.cell(row=5, column=i + 1).font = Font(bold=True)
-                ws.cell(row=6, column=i + 1, value=value)
-
-            ws['A8'] = "支付方式占比"
-            ws['A8'].font = Font(bold=True, size=12)
-
-            pay_headers = ["支付方式", "笔数", "金额", "使用时长", "占比"]
-            for i, h in enumerate(pay_headers):
-                cell = ws.cell(row=9, column=i + 1, value=h)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = center_align
-                cell.border = thin_border
-
-            total_final = stats['total_final'] if stats['total_final'] > 0 else 1
-            row_idx = 10
-            for method, data in sorted(stats["by_payment"].items()):
-                pct = round(data["amount"] / total_final * 100, 1)
-                values = [method, data["count"], f"¥{data['amount']:.2f}",
-                          f"{data['hours']:.1f}h", f"{pct}%"]
-                for i, v in enumerate(values):
-                    cell = ws.cell(row=row_idx, column=i + 1, value=v)
-                    cell.border = thin_border
+            def _style_header_row(ws, headers, row=1):
+                for i, h in enumerate(headers):
+                    cell = ws.cell(row=row, column=i + 1, value=h)
+                    cell.font = header_font
+                    cell.fill = header_fill
                     cell.alignment = center_align
-                row_idx += 1
+                    cell.border = thin_border
 
-            row_idx += 2
-            ws.cell(row=row_idx, column=1, value="周期明细").font = Font(bold=True, size=12)
-            row_idx += 1
-
-            detail_headers = ["周期", "账单数", "营业额", "优惠额", "实收额", "使用时长", "客单价"]
-            for i, h in enumerate(detail_headers):
-                cell = ws.cell(row=row_idx, column=i + 1, value=h)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = center_align
-                cell.border = thin_border
-            row_idx += 1
-
-            by_date = stats["by_date"]
-            view_mode = self.combo_view_mode.currentText()
-            if view_mode == "日视图":
-                items = sorted(by_date.keys())
-                for ds in items:
-                    d = by_date[ds]
-                    avg = round(d["final"] / d["count"], 2) if d["count"] > 0 else 0
-                    values = [ds, d["count"], f"¥{d['base']:.2f}", f"¥{d['discount']:.2f}",
-                              f"¥{d['final']:.2f}", f"{d['hours']:.1f}h", f"¥{avg:.2f}"]
-                    for i, v in enumerate(values):
-                        cell = ws.cell(row=row_idx, column=i + 1, value=v)
+            def _style_data_rows(ws, rows_data, start_row, num_fmt_cols=None):
+                num_fmt_cols = num_fmt_cols or []
+                for ri, row_vals in enumerate(rows_data):
+                    r = start_row + ri
+                    for ci, v in enumerate(row_vals):
+                        cell = ws.cell(row=r, column=ci + 1, value=v)
                         cell.border = thin_border
                         cell.alignment = center_align
-                    row_idx += 1
+                        if ci in num_fmt_cols and isinstance(v, (int, float)):
+                            cell.number_format = '¥#,##0.00'
+
+            def _write_title(ws, title, period, cols=6):
+                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=cols)
+                ws.cell(row=1, column=1, value=title).font = title_font
+                ws.cell(row=1, column=1).alignment = center_align
+                ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=cols)
+                ws.cell(row=2, column=1, value=f"统计周期: {period}").font = period_font
+                ws.cell(row=2, column=1).alignment = center_align
+
+            def _auto_width(ws, cols_num, min_w=14):
+                for col in range(1, cols_num + 1):
+                    ws.column_dimensions[chr(64 + col)].width = max(min_w, 18)
+
+            period_str = f"{stats['start_date']} 至 {stats['end_date']}"
+
+            # ============ Sheet1: 营业汇总 ============
+            ws1 = wb.active
+            ws1.title = "营业汇总"
+            _write_title(ws1, "茶楼麻将房 - 营业汇总表", period_str, 6)
+
+            ws1.cell(row=4, column=1, value="核心指标").font = section_font
+
+            summary_headers = ["指标", "数值"]
+            _style_header_row(ws1, summary_headers, row=5)
+
+            summary_data = [
+                ["账单总数", stats['bill_count']],
+                ["营业额（应收）", round(stats['total_base'], 2)],
+                ["优惠合计", round(stats['total_discount'], 2)],
+                ["实收金额", round(stats['total_final'], 2)],
+                ["使用时长（小时）", round(stats['total_hours'], 1)],
+                ["客单价", round(stats['avg_per_bill'], 2)],
+            ]
+            _style_data_rows(ws1, summary_data, start_row=6, num_fmt_cols=[1])
+
+            start_row = 6 + len(summary_data) + 2
+            ws1.cell(row=start_row, column=1, value="周期明细").font = section_font
+            start_row += 1
+
+            view_mode = self.combo_view_mode.currentText()
+            detail_headers = ["周期", "账单数", "营业额", "优惠额", "实收额", "使用时长(h)", "客单价"]
+            _style_header_row(ws1, detail_headers, row=start_row)
+            start_row += 1
+
+            period_rows = []
+            by_date = stats["by_date"]
+            if view_mode == "日视图":
+                for ds in sorted(by_date.keys()):
+                    d = by_date[ds]
+                    avg = round(d["final"] / d["count"], 2) if d["count"] > 0 else 0
+                    period_rows.append([ds, d["count"], round(d["base"], 2), round(d["discount"], 2),
+                                        round(d["final"], 2), round(d["hours"], 1), avg])
             elif view_mode == "周视图":
                 from datetime import timedelta as td
                 weeks = {}
                 for ds in sorted(by_date.keys()):
-                    d = date.fromisoformat(ds)
-                    monday = d - td(days=d.weekday())
+                    d_date = date.fromisoformat(ds)
+                    monday = d_date - td(days=d_date.weekday())
                     sunday = monday + td(days=6)
                     week_key = f"{monday.isoformat()} ~ {sunday.isoformat()}"
                     if week_key not in weeks:
@@ -759,13 +909,8 @@ class BillingWidget(BaseWidget):
                 for week_key in sorted(weeks.keys()):
                     w = weeks[week_key]
                     avg = round(w["final"] / w["count"], 2) if w["count"] > 0 else 0
-                    values = [week_key, w["count"], f"¥{w['base']:.2f}", f"¥{w['discount']:.2f}",
-                              f"¥{w['final']:.2f}", f"{w['hours']:.1f}h", f"¥{avg:.2f}"]
-                    for i, v in enumerate(values):
-                        cell = ws.cell(row=row_idx, column=i + 1, value=v)
-                        cell.border = thin_border
-                        cell.alignment = center_align
-                    row_idx += 1
+                    period_rows.append([week_key, w["count"], round(w["base"], 2), round(w["discount"], 2),
+                                        round(w["final"], 2), round(w["hours"], 1), avg])
             elif view_mode == "月视图":
                 months = {}
                 for ds in sorted(by_date.keys()):
@@ -778,23 +923,170 @@ class BillingWidget(BaseWidget):
                 for month_key in sorted(months.keys()):
                     m = months[month_key]
                     avg = round(m["final"] / m["count"], 2) if m["count"] > 0 else 0
-                    values = [month_key, m["count"], f"¥{m['base']:.2f}", f"¥{m['discount']:.2f}",
-                              f"¥{m['final']:.2f}", f"{m['hours']:.1f}h", f"¥{avg:.2f}"]
-                    for i, v in enumerate(values):
-                        cell = ws.cell(row=row_idx, column=i + 1, value=v)
-                        cell.border = thin_border
-                        cell.alignment = center_align
-                    row_idx += 1
+                    period_rows.append([month_key, m["count"], round(m["base"], 2), round(m["discount"], 2),
+                                        round(m["final"], 2), round(m["hours"], 1), avg])
 
-            for col in range(1, 8):
-                ws.column_dimensions[chr(64 + col)].width = 18
+            _style_data_rows(ws1, period_rows, start_row=start_row, num_fmt_cols=[2, 3, 4, 6])
+
+            if analysis:
+                start_row2 = start_row + len(period_rows) + 2
+                ws1.cell(row=start_row2, column=1, value="经营分析").font = section_font
+                start_row2 += 1
+                kpi_headers = ["指标", "数值"]
+                _style_header_row(ws1, kpi_headers, row=start_row2)
+                start_row2 += 1
+                kpi_data = [
+                    ["桌台利用率", f"{analysis['utilization']}%"],
+                    ["统计天数", analysis['date_range_days']],
+                    ["桌台总数", analysis['total_tables']],
+                    ["会员消费占比(笔数)", f"{analysis['member_ratio']}%"],
+                    ["会员消费占比(金额)", f"{analysis['member_amount_ratio']}%"],
+                    ["累计节省金额(全部会员)",
+                     round(sum(d["amount"] for d in analysis["by_discount_source"].values()), 2)],
+                ]
+                _style_data_rows(ws1, kpi_data, start_row=start_row2, num_fmt_cols=[1])
+
+            _auto_width(ws1, 7)
+
+            # ============ Sheet2: 支付方式 ============
+            ws2 = wb.create_sheet("支付方式")
+            _write_title(ws2, "茶楼麻将房 - 支付方式统计表", period_str, 5)
+
+            ws2.cell(row=4, column=1, value="按支付方式统计").font = section_font
+            pay_headers = ["支付方式", "笔数", "金额", "使用时长(h)", "占比"]
+            _style_header_row(ws2, pay_headers, row=5)
+
+            total_final = stats['total_final'] if stats['total_final'] > 0 else 1
+            pay_rows = []
+            for method, data in sorted(stats["by_payment"].items()):
+                pct = round(data["amount"] / total_final * 100, 1)
+                pay_rows.append([method, data["count"], round(data["amount"], 2),
+                                 round(data["hours"], 1), f"{pct}%"])
+            _style_data_rows(ws2, pay_rows, start_row=6, num_fmt_cols=[2])
+
+            if analysis:
+                start_row3 = 6 + len(pay_rows) + 2
+                ws2.cell(row=start_row3, column=1, value="按优惠来源统计").font = section_font
+                start_row3 += 1
+                src_headers = ["优惠来源", "使用笔数", "优惠金额"]
+                _style_header_row(ws2, src_headers, row=start_row3)
+                start_row3 += 1
+                src_rows = []
+                for src in ["会员折扣", "优惠券折扣"]:
+                    d = analysis["by_discount_source"].get(src, {"count": 0, "amount": 0})
+                    src_rows.append([src, d["count"], round(d["amount"], 2)])
+                _style_data_rows(ws2, src_rows, start_row=start_row3, num_fmt_cols=[2])
+
+            _auto_width(ws2, 5)
+
+            # ============ Sheet3: 会员消费 ============
+            ws3 = wb.create_sheet("会员消费")
+            _write_title(ws3, "茶楼麻将房 - 会员消费统计", period_str, 7)
+
+            if analysis:
+                ws3.cell(row=4, column=1, value="会员消费总体分析").font = section_font
+                mem_headers = ["指标", "数值"]
+                _style_header_row(ws3, mem_headers, row=5)
+                mem_rows = [
+                    ["会员账单数", analysis["member_count"]],
+                    ["会员实收金额", round(analysis["member_amount"], 2)],
+                    ["会员笔数占比", f"{analysis['member_ratio']}%"],
+                    ["会员金额占比", f"{analysis['member_amount_ratio']}%"],
+                    ["会员折扣节省(全部)",
+                     round(analysis["by_discount_source"].get("会员折扣", {"amount": 0})["amount"], 2)],
+                    ["优惠券节省(会员单)",
+                     round(analysis["by_discount_source"].get("优惠券折扣", {"amount": 0})["amount"], 2)],
+                ]
+                _style_data_rows(ws3, mem_rows, start_row=6, num_fmt_cols=[1])
+
+                start_row4 = 6 + len(mem_rows) + 2
+                ws3.cell(row=start_row4, column=1, value="各账单会员消费明细（全部账单）").font = section_font
+                start_row4 += 1
+                detail_bill_headers = ["账单号", "桌号", "会员ID", "应收", "优惠", "实收", "支付方式", "支付时间"]
+                _style_header_row(ws3, detail_bill_headers, row=start_row4)
+                start_row4 += 1
+
+                from database.models import Bill as BillModel
+                bills_all = self.db.query(BillModel).filter(
+                    BillModel.is_paid == True,
+                    BillModel.paid_at >= datetime.combine(analysis["start_date"], datetime.min.time()),
+                    BillModel.paid_at <= datetime.combine(analysis["end_date"], datetime.max.time())
+                ).order_by(BillModel.paid_at.desc()).all()
+                bill_rows = []
+                for b in bills_all:
+                    bill_rows.append([
+                        b.bill_no,
+                        b.table_number or "",
+                        b.member_id or "非会员",
+                        round(b.base_amount, 2),
+                        round(b.discount_amount, 2),
+                        round(b.final_amount, 2),
+                        b.payment_method or "",
+                        b.paid_at.strftime('%Y-%m-%d %H:%M:%S') if b.paid_at else ""
+                    ])
+                _style_data_rows(ws3, bill_rows, start_row=start_row4, num_fmt_cols=[3, 4, 5])
+
+            _auto_width(ws3, 8, min_w=16)
+
+            # ============ Sheet4: 桌台利用率 ============
+            ws4 = wb.create_sheet("桌台利用率")
+            _write_title(ws4, "茶楼麻将房 - 桌台利用率", period_str, 6)
+
+            if analysis:
+                ws4.cell(row=4, column=1, value="桌台使用明细").font = section_font
+                util_headers = ["桌号", "消费次数", "营收金额", "使用时长(h)", "估算利用率", "排名"]
+                _style_header_row(ws4, util_headers, row=5)
+
+                possible_per_table = analysis["date_range_days"] * 12
+                sorted_tables = sorted(analysis["by_table"].items(),
+                                        key=lambda x: x[1]["hours"], reverse=True)
+                table_rows = []
+                for rank, (tn, t) in enumerate(sorted_tables, 1):
+                    util_e = round(t["hours"] / possible_per_table * 100, 1) if possible_per_table > 0 else 0
+                    table_rows.append([
+                        tn, t["count"], round(t["final"], 2),
+                        round(t["hours"], 1), f"{util_e}%", rank
+                    ])
+                _style_data_rows(ws4, table_rows, start_row=6, num_fmt_cols=[2])
+
+                start_row5 = 6 + len(table_rows) + 2
+                ws4.cell(row=start_row5, column=1, value="热门时段(按到店次数)").font = section_font
+                start_row5 += 1
+                hour_headers = ["时段", "次数", "营收金额", "排名"]
+                _style_header_row(ws4, hour_headers, row=start_row5)
+                start_row5 += 1
+                hour_rows = []
+                for i, hh in enumerate(analysis["hot_hours"]):
+                    hour_rows.append([hh["hour_range"], hh["count"], round(hh["amount"], 2), i + 1])
+                _style_data_rows(ws4, hour_rows, start_row=start_row5, num_fmt_cols=[2])
+
+                start_row6 = start_row5 + len(hour_rows) + 2
+                ws4.cell(row=start_row6, column=1, value="利用率汇总指标").font = section_font
+                start_row6 += 1
+                kpi_h = ["指标", "数值"]
+                _style_header_row(ws4, kpi_h, row=start_row6)
+                start_row6 += 1
+                avg_hours = round(analysis["total_hours"] / analysis["total_tables"], 1) if analysis["total_tables"] > 0 else 0
+                util_kpi = [
+                    ["统计天数", analysis["date_range_days"]],
+                    ["桌台总数", analysis["total_tables"]],
+                    ["全部桌台总时长(h)", round(analysis["total_hours"], 1)],
+                    ["单桌平均使用时长(h)", avg_hours],
+                    ["每日桌台平均次数", round(analysis["bill_count"] / analysis["date_range_days"], 1) if analysis["date_range_days"] > 0 else 0],
+                    ["整体桌台利用率", f"{analysis['utilization']}%"],
+                ]
+                _style_data_rows(ws4, util_kpi, start_row=start_row6, num_fmt_cols=[1])
+
+            _auto_width(ws4, 6)
 
             wb.save(file_path)
-            self.show_info("成功", f"报表已导出到:\n{file_path}")
+            self.show_info("成功", f"报表已导出到:\n{file_path}\n共 4 个工作表:营业汇总/支付方式/会员消费/桌台利用率")
         except ImportError:
             self.show_error("错误", "导出Excel需要安装 openpyxl 库")
         except Exception as e:
             self.show_error("错误", f"导出失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def refresh(self):
         self.refresh_bills()

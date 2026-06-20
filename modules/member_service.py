@@ -283,3 +283,126 @@ class MemberService:
         self.db.refresh(member)
         self.db.refresh(consumption)
         return consumption
+
+    def record_consumption_only(self, member_id: int, amount: float, bill_id: int = None,
+                                 bill_no: str = None, table_number: str = None,
+                                 member_discount: float = 0.0, coupon_discount: float = 0.0,
+                                 discount_detail: str = None, payment_method: str = "",
+                                 description: str = "") -> MemberConsumption:
+        member = self.get_member(member_id)
+        if not member:
+            raise ValueError("会员不存在")
+        if amount <= 0:
+            raise ValueError("消费金额必须大于0")
+
+        balance_before = member.balance
+        member.total_consumption = round(member.total_consumption + amount, 2)
+        member.visit_count += 1
+
+        if hasattr(member, 'total_saved'):
+            member.total_saved = (member.total_saved or 0) + member_discount + coupon_discount
+
+        member.updated_at = datetime.now()
+
+        desc_prefix = f"{payment_method}支付，未扣余额" if payment_method else "未扣余额"
+        consumption = MemberConsumption(
+            member_id=member_id,
+            bill_id=bill_id,
+            type="消费",
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=balance_before,
+            description=f"{desc_prefix} | {description or f'账单 {bill_no or bill_id}'}",
+            bill_no=bill_no,
+            table_number=table_number,
+            member_discount=member_discount,
+            coupon_discount=coupon_discount,
+            discount_detail=discount_detail,
+            created_at=datetime.now()
+        )
+        self.db.add(consumption)
+        self.db.commit()
+        self.db.refresh(member)
+        self.db.refresh(consumption)
+        return consumption
+
+    def get_member_statistics(self, member_id: int, start_date: date = None,
+                               end_date: date = None) -> dict:
+        member = self.get_member(member_id)
+        if not member:
+            return {}
+
+        query = self.db.query(MemberConsumption).filter(
+            MemberConsumption.member_id == member_id
+        )
+        if start_date:
+            query = query.filter(
+                MemberConsumption.created_at >= datetime.combine(start_date, datetime.min.time())
+            )
+        if end_date:
+            query = query.filter(
+                MemberConsumption.created_at <= datetime.combine(end_date, datetime.max.time())
+            )
+        consumptions = query.order_by(MemberConsumption.created_at.desc()).all()
+
+        total_recharge = 0.0
+        total_recharge_actual = 0.0
+        total_recharge_bonus = 0.0
+        total_consume = 0.0
+        total_member_discount = 0.0
+        total_coupon_discount = 0.0
+        recharge_count = 0
+        consume_count = 0
+
+        for c in consumptions:
+            if c.type == "充值":
+                recharge_count += 1
+                total_recharge += c.amount or 0
+                if hasattr(c, 'recharge_amount') and c.recharge_amount:
+                    total_recharge_actual += c.recharge_amount
+                else:
+                    total_recharge_actual += c.amount or 0
+                if hasattr(c, 'bonus_amount') and c.bonus_amount:
+                    total_recharge_bonus += c.bonus_amount
+            elif c.type == "消费":
+                consume_count += 1
+                total_consume += c.amount or 0
+                if hasattr(c, 'member_discount') and c.member_discount:
+                    total_member_discount += c.member_discount
+                if hasattr(c, 'coupon_discount') and c.coupon_discount:
+                    total_coupon_discount += c.coupon_discount
+
+        total_saved = total_member_discount + total_coupon_discount
+
+        first_record = consumptions[-1] if consumptions else None
+        last_record = consumptions[0] if consumptions else None
+        start_balance = first_record.balance_before if first_record else member.balance
+        end_balance = last_record.balance_after if last_record else member.balance
+
+        return {
+            "member": member,
+            "start_date": start_date,
+            "end_date": end_date,
+            "recharge_count": recharge_count,
+            "consume_count": consume_count,
+            "total_recharge": round(total_recharge, 2),
+            "total_recharge_actual": round(total_recharge_actual, 2),
+            "total_recharge_bonus": round(total_recharge_bonus, 2),
+            "total_consume": round(total_consume, 2),
+            "total_member_discount": round(total_member_discount, 2),
+            "total_coupon_discount": round(total_coupon_discount, 2),
+            "total_saved": round(total_saved, 2),
+            "start_balance": round(start_balance, 2),
+            "end_balance": round(end_balance, 2),
+            "balance_change": round(end_balance - start_balance, 2),
+            "consumptions": consumptions
+        }
+
+    def get_member_monthly_statement(self, member_id: int, year: int, month: int) -> dict:
+        from datetime import timedelta
+        start_date = date(year, month, 1)
+        if month == 12:
+            end_date = date(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            end_date = date(year, month + 1, 1) - timedelta(days=1)
+        return self.get_member_statistics(member_id, start_date, end_date)

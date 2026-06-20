@@ -157,21 +157,36 @@ class BillService:
             )
         discount_detail = "\n".join(discount_detail_list)
 
-        if payment_method == "会员卡" and member_id:
-            from modules.member_service import MemberService
-            member_service = MemberService(self.db)
-            member_service.consume_with_detail(
-                member_id=member_id,
-                amount=bill.final_amount,
-                bill_id=bill.id,
-                bill_no=bill.bill_no,
-                table_number=bill.table_number,
-                member_discount=member_discount,
-                coupon_discount=coupon_discount,
-                discount_detail=discount_detail,
-                description=f"账单 {bill.bill_no} 会员卡支付"
-            )
+        from modules.member_service import MemberService
+        member_service = MemberService(self.db)
+
+        if member_id and (member_discount > 0 or coupon_discount > 0 or payment_method == "会员卡"):
             bill.member_id = member_id
+            if payment_method == "会员卡":
+                member_service.consume_with_detail(
+                    member_id=member_id,
+                    amount=bill.final_amount,
+                    bill_id=bill.id,
+                    bill_no=bill.bill_no,
+                    table_number=bill.table_number,
+                    member_discount=member_discount,
+                    coupon_discount=coupon_discount,
+                    discount_detail=discount_detail,
+                    description=f"账单 {bill.bill_no} 会员卡支付"
+                )
+            else:
+                member_service.record_consumption_only(
+                    member_id=member_id,
+                    amount=bill.final_amount,
+                    bill_id=bill.id,
+                    bill_no=bill.bill_no,
+                    table_number=bill.table_number,
+                    member_discount=member_discount,
+                    coupon_discount=coupon_discount,
+                    discount_detail=discount_detail,
+                    payment_method=payment_method,
+                    description=f"账单 {bill.bill_no} {payment_method}支付"
+                )
 
         bill.is_paid = True
         bill.payment_method = payment_method
@@ -258,6 +273,115 @@ class BillService:
             "avg_per_bill": avg_per_bill,
             "by_payment": by_payment,
             "by_date": by_date
+        }
+
+    def get_business_analysis(self, start_date: date, end_date: date) -> dict:
+        bills = self.db.query(Bill).filter(
+            Bill.is_paid == True,
+            Bill.paid_at >= datetime.combine(start_date, datetime.min.time()),
+            Bill.paid_at <= datetime.combine(end_date, datetime.max.time())
+        ).all()
+
+        bill_count = len(bills)
+        total_base = round(sum(b.base_amount for b in bills), 2)
+        total_discount = round(sum(b.discount_amount for b in bills), 2)
+        total_final = round(sum(b.final_amount for b in bills), 2)
+        total_hours = round(sum(b.total_hours or 0 for b in bills), 2)
+
+        member_bills = [b for b in bills if b.member_id]
+        member_count = len(member_bills)
+        member_amount = round(sum(b.final_amount for b in member_bills), 2)
+        member_ratio = round(member_count / bill_count * 100, 1) if bill_count > 0 else 0
+        member_amount_ratio = round(member_amount / total_final * 100, 1) if total_final > 0 else 0
+
+        by_table = {}
+        for b in bills:
+            tn = b.table_number or "未知"
+            if tn not in by_table:
+                by_table[tn] = {"count": 0, "hours": 0.0, "final": 0.0}
+            by_table[tn]["count"] += 1
+            by_table[tn]["hours"] += (b.total_hours or 0)
+            by_table[tn]["final"] += b.final_amount
+
+        from database.models import MahjongTable, TableStatus
+        from modules.table_service import TableService
+        table_service = TableService(self.db)
+        total_tables = len(table_service.get_all_tables())
+        date_range_days = (end_date - start_date).days + 1
+        total_possible_hours = total_tables * date_range_days * 12
+        utilization = round(total_hours / total_possible_hours * 100, 1) if total_possible_hours > 0 else 0
+
+        by_hour = {}
+        for b in bills:
+            if b.checkin_time:
+                hour = b.checkin_time.hour
+                if hour not in by_hour:
+                    by_hour[hour] = {"count": 0, "hours": 0.0, "final": 0.0}
+                by_hour[hour]["count"] += 1
+                by_hour[hour]["hours"] += (b.total_hours or 0)
+                by_hour[hour]["final"] += b.final_amount
+
+        hot_hours_sorted = sorted(by_hour.items(), key=lambda x: x[1]["count"], reverse=True)
+        hot_hours = []
+        for h, data in hot_hours_sorted:
+            next_h = (h + 1) % 24
+            hot_hours.append({
+                "hour_range": f"{h:02d}:00-{next_h:02d}:00",
+                "count": data["count"],
+                "amount": round(data["final"], 2)
+            })
+
+        by_discount_source = {}
+        by_discount_source["会员折扣"] = {"count": 0, "amount": 0.0}
+        by_discount_source["优惠券折扣"] = {"count": 0, "amount": 0.0}
+        for b in bills:
+            member_d = 0.0
+            coupon_d = 0.0
+            for bd in b.discounts:
+                if bd.coupon_type == "会员折扣" or bd.coupon_id is None:
+                    member_d += (bd.applied_amount or 0)
+                else:
+                    coupon_d += (bd.applied_amount or 0)
+            if member_d > 0:
+                by_discount_source["会员折扣"]["count"] += 1
+                by_discount_source["会员折扣"]["amount"] += member_d
+            if coupon_d > 0:
+                by_discount_source["优惠券折扣"]["count"] += 1
+                by_discount_source["优惠券折扣"]["amount"] += coupon_d
+        for k in by_discount_source:
+            by_discount_source[k]["amount"] = round(by_discount_source[k]["amount"], 2)
+
+        by_payment = {}
+        for b in bills:
+            method = b.payment_method or "未知"
+            if method not in by_payment:
+                by_payment[method] = {"count": 0, "amount": 0.0}
+            by_payment[method]["count"] += 1
+            by_payment[method]["amount"] += b.final_amount
+        for k in by_payment:
+            by_payment[k]["amount"] = round(by_payment[k]["amount"], 2)
+            by_payment[k]["ratio"] = round(by_payment[k]["amount"] / total_final * 100, 1) if total_final > 0 else 0
+
+        return {
+            "start_date": start_date,
+            "end_date": end_date,
+            "bill_count": bill_count,
+            "total_base": total_base,
+            "total_discount": total_discount,
+            "total_final": total_final,
+            "total_hours": total_hours,
+            "avg_per_bill": round(total_final / bill_count, 2) if bill_count > 0 else 0,
+            "member_count": member_count,
+            "member_amount": member_amount,
+            "member_ratio": member_ratio,
+            "member_amount_ratio": member_amount_ratio,
+            "total_tables": total_tables,
+            "date_range_days": date_range_days,
+            "utilization": utilization,
+            "by_table": by_table,
+            "hot_hours": hot_hours,
+            "by_discount_source": by_discount_source,
+            "by_payment": by_payment
         }
 
     def generate_print_content(self, bill_id: int) -> str:

@@ -237,6 +237,14 @@ class ConsumptionDetailDialog(BaseDialog):
         if hasattr(c, 'bonus_amount') and c.bonus_amount is not None and c.bonus_amount > 0:
             self.add_field("赠送金", QLabel(f"¥{c.bonus_amount:.2f}"))
 
+        if hasattr(c, 'description') and c.description and "未扣余额" in c.description:
+            payment_method = "未知"
+            for pm in ["现金", "微信", "支付宝", "银行卡", "会员卡"]:
+                if pm in c.description:
+                    payment_method = pm
+                    break
+            self.add_field("支付方式", QLabel(f"{payment_method}（未扣余额）"))
+
         self.add_field("描述", QLabel(c.description or ""))
 
         if hasattr(c, 'discount_detail') and c.discount_detail:
@@ -274,6 +282,7 @@ class MemberManagementWidget(BaseWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._create_member_tab(), "📋 会员管理")
+        self.tabs.addTab(self._create_reconciliation_tab(), "🧾 会员对账")
         self.tabs.addTab(self._create_benefit_tab(), "🎁 等级权益")
         main_layout.addWidget(self.tabs)
 
@@ -328,7 +337,7 @@ class MemberManagementWidget(BaseWidget):
         detail_layout.addLayout(detail_btn_layout)
 
         self.consumption_table = self.create_table([
-            "ID", "类型", "金额", "账单号", "桌号", "会员折扣", "优惠券折扣", "余额", "时间"
+            "ID", "类型", "金额", "账单号", "桌号", "支付方式", "会员折扣", "优惠券折扣", "余额", "时间"
         ])
         detail_layout.addWidget(self.consumption_table)
         splitter.addWidget(detail_group)
@@ -340,6 +349,297 @@ class MemberManagementWidget(BaseWidget):
         self.consumption_table.itemDoubleClicked.connect(lambda: self.view_consumption_detail())
 
         return tab
+
+    def _create_reconciliation_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(8)
+
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("选择会员:"))
+        self.combo_recon_member = QComboBox()
+        self.combo_recon_member.setMinimumHeight(32)
+        self.combo_recon_member.setMinimumWidth(200)
+        filter_layout.addWidget(self.combo_recon_member)
+
+        filter_layout.addSpacing(15)
+        filter_layout.addWidget(QLabel("查询月份:"))
+        self.spin_recon_year = QSpinBox()
+        self.spin_recon_year.setRange(2020, 2100)
+        self.spin_recon_year.setValue(QDate.currentDate().year())
+        filter_layout.addWidget(self.spin_recon_year)
+        self.combo_recon_month = QComboBox()
+        for m in range(1, 13):
+            self.combo_recon_month.addItem(f"{m}月", m)
+        self.combo_recon_month.setCurrentIndex(QDate.currentDate().month() - 1)
+        filter_layout.addWidget(self.combo_recon_month)
+
+        self.btn_recon_query = self.create_button("🔍 查询", callback=self.query_reconciliation)
+        filter_layout.addWidget(self.btn_recon_query)
+        self.btn_recon_export = self.create_button("📥 导出对账", callback=self.export_member_statement)
+        filter_layout.addWidget(self.btn_recon_export)
+        filter_layout.addStretch()
+        layout.addLayout(filter_layout)
+
+        summary_group = QGroupBox("月度汇总")
+        summary_grid_layout = QVBoxLayout(summary_group)
+        self.recon_summary_table = self.create_table([
+            "项目", "金额/数量"
+        ])
+        summary_grid_layout.addWidget(self.recon_summary_table)
+        layout.addWidget(summary_group)
+
+        detail_group = QGroupBox("月度明细（双击查看详情）")
+        detail_layout = QVBoxLayout(detail_group)
+        self.recon_detail_table = self.create_table([
+            "时间", "类型", "账单号", "桌号", "支付方式", "金额", "会员折扣", "优惠券折扣", "余额"
+        ])
+        detail_layout.addWidget(self.recon_detail_table)
+        layout.addWidget(detail_group)
+
+        self.recon_detail_table.itemDoubleClicked.connect(
+            lambda: self.view_recon_detail()
+        )
+
+        return tab
+
+    def on_show_reconciliation_tab(self):
+        self._refresh_recon_member_combo()
+
+    def _refresh_recon_member_combo(self):
+        self.combo_recon_member.clear()
+        members = self.member_service.get_all_members(only_active=False)
+        for m in members:
+            discount = self.member_service.get_level_discount(m.level)
+            self.combo_recon_member.addItem(
+                f"{m.name} ({m.phone}) - {m.level.value}({discount}折)",
+                m.id
+            )
+
+    def query_reconciliation(self):
+        idx = self.combo_recon_member.currentIndex()
+        if idx < 0:
+            self.show_info("提示", "请先选择会员")
+            return
+        member_id = self.combo_recon_member.itemData(idx)
+        if not member_id:
+            self.show_error("错误", "会员无效")
+            return
+
+        year = self.spin_recon_year.value()
+        month = self.combo_recon_month.currentData()
+
+        try:
+            stmt = self.member_service.get_member_monthly_statement(member_id, year, month)
+            self._current_recon_statement = stmt
+            self._display_reconciliation_summary(stmt)
+            self._display_reconciliation_details(stmt)
+        except Exception as e:
+            self.show_error("错误", f"查询失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _display_reconciliation_summary(self, stmt):
+        self.clear_table(self.recon_summary_table)
+
+        rows_data = [
+            ("会员姓名", stmt["member"].name),
+            ("统计周期", f"{stmt['start_date']} 至 {stmt['end_date']}"),
+            ("期初余额", f"¥{stmt['start_balance']:.2f}"),
+            ("期末余额", f"¥{stmt['end_balance']:.2f}"),
+            ("余额变动", f"¥{stmt['balance_change']:.2f}"),
+            ("---", "---"),
+            ("充值笔数", str(stmt['recharge_count'])),
+            ("充值金额(本金)", f"¥{stmt['total_recharge_actual']:.2f}"),
+            ("充值赠送金", f"¥{stmt['total_recharge_bonus']:.2f}"),
+            ("充值到账合计", f"¥{stmt['total_recharge']:.2f}"),
+            ("---", "---"),
+            ("消费笔数", str(stmt['consume_count'])),
+            ("消费金额", f"¥{stmt['total_consume']:.2f}"),
+            ("会员折扣节省", f"¥{stmt['total_member_discount']:.2f}"),
+            ("优惠券折扣节省", f"¥{stmt['total_coupon_discount']:.2f}"),
+            ("累计节省合计", f"¥{stmt['total_saved']:.2f}"),
+        ]
+        for label, value in rows_data:
+            row = self.recon_summary_table.rowCount()
+            self.recon_summary_table.insertRow(row)
+            self.set_table_row(self.recon_summary_table, row, [label, value])
+
+            if label.startswith("充值") or "赠送金" in label or "到账" in label:
+                self.recon_summary_table.item(row, 1).setForeground(QBrush(QColor("#4caf50")))
+            elif "消费" in label or "金额" in label and "充值" not in label:
+                self.recon_summary_table.item(row, 1).setForeground(QBrush(QColor("#f44336")))
+            elif "节省" in label:
+                self.recon_summary_table.item(row, 1).setForeground(QBrush(QColor("#2196f3")))
+
+    def _display_reconciliation_details(self, stmt):
+        self.clear_table(self.recon_detail_table)
+        consumptions = stmt["consumptions"]
+        for c in consumptions:
+            row = self.recon_detail_table.rowCount()
+            self.recon_detail_table.insertRow(row)
+
+            time_str = c.created_at.strftime('%Y-%m-%d %H:%M') if c.created_at else ""
+            bill_no = c.bill_no if hasattr(c, 'bill_no') and c.bill_no else "-"
+            table_number = c.table_number if hasattr(c, 'table_number') and c.table_number else "-"
+            m_disc = f"-¥{c.member_discount:.2f}" if hasattr(c, 'member_discount') and c.member_discount and c.member_discount > 0 else "-"
+            c_disc = f"-¥{c.coupon_discount:.2f}" if hasattr(c, 'coupon_discount') and c.coupon_discount and c.coupon_discount > 0 else "-"
+
+            payment_method = "-"
+            if c.type == "消费" and hasattr(c, 'description') and c.description:
+                for pm in ["会员卡", "现金", "微信", "支付宝", "银行卡"]:
+                    if pm in c.description:
+                        if "未扣余额" in c.description:
+                            payment_method = f"{pm}(非卡扣)"
+                        else:
+                            payment_method = pm
+                        break
+
+            self.set_table_row(self.recon_detail_table, row, [
+                time_str, c.type, bill_no, table_number, payment_method,
+                f"¥{c.amount:.2f}", m_disc, c_disc, f"¥{c.balance_after:.2f}"
+            ])
+
+            type_item = self.recon_detail_table.item(row, 1)
+            if c.type == "充值":
+                type_item.setForeground(QBrush(QColor("#4caf50")))
+            elif c.type == "消费":
+                type_item.setForeground(QBrush(QColor("#f44336")))
+
+    def view_recon_detail(self):
+        row = self.recon_detail_table.currentRow()
+        if row < 0:
+            self.show_info("提示", "请选择要查看的记录")
+            return
+        time_str = self.recon_detail_table.item(row, 0).text()
+
+        stmt = getattr(self, '_current_recon_statement', None)
+        if not stmt:
+            return
+
+        target = None
+        for c in stmt["consumptions"]:
+            if c.created_at and c.created_at.strftime('%Y-%m-%d %H:%M') == time_str:
+                target = c
+                break
+
+        if target:
+            dialog = ConsumptionDetailDialog(self, target)
+            dialog.exec()
+
+    def export_member_statement(self):
+        stmt = getattr(self, '_current_recon_statement', None)
+        if not stmt:
+            self.show_info("提示", "请先查询对账数据")
+            return
+
+        try:
+            from PySide6.QtWidgets import QFileDialog
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+            m = stmt["member"]
+            default_name = f"会员对账_{m.name}_{stmt['start_date']}-{stmt['end_date']}.xlsx"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "导出会员对账", default_name, "Excel文件 (*.xlsx)"
+            )
+            if not file_path:
+                return
+
+            wb = Workbook()
+
+            header_font = Font(bold=True, size=11, color="FFFFFF")
+            header_fill = PatternFill(start_color="1976D2", end_color="1976D2", fill_type="solid")
+            center_align = Alignment(horizontal="center", vertical="center")
+            thin_border = Border(
+                left=Side(style='thin'), right=Side(style='thin'),
+                top=Side(style='thin'), bottom=Side(style='thin')
+            )
+
+            ws1 = wb.active
+            ws1.title = "月度汇总"
+            ws1.merge_cells('A1:B1')
+            ws1['A1'] = f"会员月度对账 - {m.name}"
+            ws1['A1'].font = Font(bold=True, size=14)
+            ws1['A1'].alignment = center_align
+
+            ws1['A2'] = f"周期: {stmt['start_date']} 至 {stmt['end_date']}"
+            ws1.merge_cells('A2:B2')
+            ws1['A2'].alignment = center_align
+
+            summary_rows = [
+                ("期初余额", stmt['start_balance']),
+                ("期末余额", stmt['end_balance']),
+                ("余额变动", stmt['balance_change']),
+                ("", ""),
+                ("充值笔数", stmt['recharge_count']),
+                ("充值金额(本金)", stmt['total_recharge_actual']),
+                ("充值赠送金", stmt['total_recharge_bonus']),
+                ("充值到账合计", stmt['total_recharge']),
+                ("", ""),
+                ("消费笔数", stmt['consume_count']),
+                ("消费金额", stmt['total_consume']),
+                ("会员折扣节省", stmt['total_member_discount']),
+                ("优惠券折扣节省", stmt['total_coupon_discount']),
+                ("累计节省合计", stmt['total_saved']),
+            ]
+            for i, (k, v) in enumerate(summary_rows):
+                row = i + 4
+                ws1.cell(row=row, column=1, value=k)
+                cell_v = ws1.cell(row=row, column=2, value=v)
+                if isinstance(v, float):
+                    cell_v.number_format = '¥#,##0.00'
+
+            ws2 = wb.create_sheet("月度明细")
+            detail_headers = ["时间", "类型", "账单号", "桌号", "支付方式", "金额", "会员折扣", "优惠券折扣", "余额"]
+            for i, h in enumerate(detail_headers):
+                cell = ws2.cell(row=1, column=i + 1, value=h)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = center_align
+                cell.border = thin_border
+
+            for ri, c in enumerate(stmt["consumptions"]):
+                row = ri + 2
+                payment_method = "-"
+                if c.type == "消费" and hasattr(c, 'description') and c.description:
+                    for pm in ["会员卡", "现金", "微信", "支付宝", "银行卡"]:
+                        if pm in c.description:
+                            if "未扣余额" in c.description:
+                                payment_method = f"{pm}(非卡扣)"
+                            else:
+                                payment_method = pm
+                            break
+                values = [
+                    c.created_at.strftime('%Y-%m-%d %H:%M:%S') if c.created_at else "",
+                    c.type,
+                    c.bill_no if hasattr(c, 'bill_no') and c.bill_no else "",
+                    c.table_number if hasattr(c, 'table_number') and c.table_number else "",
+                    payment_method,
+                    c.amount,
+                    c.member_discount if hasattr(c, 'member_discount') and c.member_discount else 0,
+                    c.coupon_discount if hasattr(c, 'coupon_discount') and c.coupon_discount else 0,
+                    c.balance_after
+                ]
+                for ci, v in enumerate(values):
+                    cell = ws2.cell(row=row, column=ci + 1, value=v)
+                    cell.border = thin_border
+                    cell.alignment = center_align
+                    if isinstance(v, float) and ci in [5, 6, 7, 8]:
+                        cell.number_format = '¥#,##0.00'
+
+            for col in range(1, 10):
+                ws1.column_dimensions[chr(64 + col)].width = 18
+                ws2.column_dimensions[chr(64 + col)].width = 18
+
+            wb.save(file_path)
+            self.show_info("成功", f"对账单已导出到:\n{file_path}")
+        except ImportError:
+            self.show_error("错误", "导出Excel需要安装 openpyxl 库")
+        except Exception as e:
+            self.show_error("错误", f"导出失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def _create_benefit_tab(self) -> QWidget:
         tab = QWidget()
@@ -400,6 +700,8 @@ class MemberManagementWidget(BaseWidget):
     def refresh(self):
         self.refresh_members()
         self.refresh_packages()
+        if hasattr(self, 'combo_recon_member'):
+            self._refresh_recon_member_combo()
 
     def refresh_members(self):
         self.clear_table(self.member_table)
@@ -492,9 +794,19 @@ class MemberManagementWidget(BaseWidget):
             m_disc = f"-¥{c.member_discount:.2f}" if hasattr(c, 'member_discount') and c.member_discount and c.member_discount > 0 else "-"
             c_disc = f"-¥{c.coupon_discount:.2f}" if hasattr(c, 'coupon_discount') and c.coupon_discount and c.coupon_discount > 0 else "-"
 
+            payment_method = "-"
+            if c.type == "消费" and hasattr(c, 'description') and c.description:
+                for pm in ["会员卡", "现金", "微信", "支付宝", "银行卡"]:
+                    if pm in c.description:
+                        if "未扣余额" in c.description:
+                            payment_method = f"{pm}(非卡扣)"
+                        else:
+                            payment_method = pm
+                        break
+
             self.set_table_row(self.consumption_table, row, [
                 c.id, c.type, f"¥{c.amount:.2f}",
-                bill_no, table_number, m_disc, c_disc,
+                bill_no, table_number, payment_method, m_disc, c_disc,
                 f"¥{c.balance_after:.2f}", time_str
             ])
             type_item = self.consumption_table.item(row, 1)
