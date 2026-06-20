@@ -89,6 +89,55 @@ class BaseWidget(QWidget):
         table.insertRow(row)
         self.set_table_row(table, row, values)
 
+    def create_double_spin(self, min_val: float = 0, max_val: float = 10000,
+                           decimals: int = 2, suffix: str = "") -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(min_val, max_val)
+        spin.setDecimals(decimals)
+        spin.setSuffix(suffix)
+        spin.setMinimumHeight(32)
+        return spin
+
+    def create_spin(self, min_val: int = 0, max_val: int = 10000,
+                    suffix: str = "") -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(min_val, max_val)
+        spin.setSuffix(suffix)
+        spin.setMinimumHeight(32)
+        return spin
+
+    def create_combo(self, items: list) -> QComboBox:
+        combo = QComboBox()
+        combo.addItems(items)
+        combo.setMinimumHeight(32)
+        return combo
+
+    def create_date_edit(self) -> QDateEdit:
+        edit = QDateEdit()
+        edit.setCalendarPopup(True)
+        edit.setDisplayFormat("yyyy-MM-dd")
+        edit.setDate(QDate.currentDate())
+        edit.setMinimumHeight(32)
+        return edit
+
+    def create_time_edit(self) -> QTimeEdit:
+        edit = QTimeEdit()
+        edit.setDisplayFormat("HH:mm")
+        edit.setMinimumHeight(32)
+        return edit
+
+    def create_line_edit(self, placeholder: str = "") -> QLineEdit:
+        edit = QLineEdit()
+        edit.setPlaceholderText(placeholder)
+        edit.setMinimumHeight(32)
+        return edit
+
+    def create_text_edit(self, placeholder: str = "") -> QTextEdit:
+        edit = QTextEdit()
+        edit.setPlaceholderText(placeholder)
+        edit.setMinimumHeight(80)
+        return edit
+
 
 class BaseDialog(QDialog):
     def __init__(self, title: str, parent=None):

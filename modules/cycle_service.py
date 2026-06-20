@@ -130,7 +130,12 @@ class CycleService:
         created_count = 0
         messages = []
 
+        conflict_dates = [c.split()[0] for c in conflicts]
+
         for preview in preview_bookings:
+            if skip_conflicts and str(preview.booking_date) in conflict_dates:
+                messages.append(f"跳过 {preview.booking_date} 预订（与现有预订冲突）")
+                continue
             try:
                 booking = booking_service.create_booking(
                     table_id=preview.table_id,
@@ -142,7 +147,8 @@ class CycleService:
                     people_count=preview.people_count,
                     cycle_rule_id=rule_id,
                     is_from_cycle=True,
-                    note=preview.note
+                    note=preview.note,
+                    check_conflict=(not skip_conflicts)
                 )
                 created_count += 1
             except Exception as e:

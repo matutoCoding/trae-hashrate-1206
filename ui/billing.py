@@ -18,6 +18,8 @@ class BillingDialog(BaseDialog):
         self.db = db
         self.booking = booking
         self.selected_coupons = []
+        self.current_result = None
+        self.created_bill = None
         super().__init__("账单结算", parent)
         self.discount_service = DiscountService(db)
         self.bill_service = BillService(db)
@@ -120,27 +122,37 @@ class BillingDialog(BaseDialog):
         self.form_layout.addRow(main_layout)
 
     def _load_data(self):
-        if self.booking:
-            table = self.booking.table
-            self.lbl_table.setText(f"{table.table_number} - {table.name}")
-            self.lbl_customer.setText(self.booking.customer_name)
-            self.lbl_date.setText(str(self.booking.booking_date))
-            time_str = f"{self.booking.start_time.strftime('%H:%M')}-{self.booking.end_time.strftime('%H:%M')}"
-            self.lbl_time.setText(time_str)
-            self.lbl_hours.setText(f"{self.booking.total_hours:.1f} 小时")
-            self.lbl_base.setText(f"¥{self.booking.base_amount:.2f}")
+        if not self.booking:
+            self.show_error("错误", "预订信息不存在")
+            return
 
+        table = self.booking.table
+        if not table:
+            self.show_error("错误", "关联的麻将桌信息不存在")
+            return
+
+        self.lbl_table.setText(f"{table.table_number} - {table.name}")
+        self.lbl_customer.setText(self.booking.customer_name)
+        self.lbl_date.setText(str(self.booking.booking_date))
+        time_str = f"{self.booking.start_time.strftime('%H:%M')}-{self.booking.end_time.strftime('%H:%M')}"
+        self.lbl_time.setText(time_str)
+        self.lbl_hours.setText(f"{self.booking.total_hours:.1f} 小时")
+        self.lbl_base.setText(f"¥{self.booking.base_amount:.2f}")
+
+        try:
             coupons = self.discount_service.get_available_coupons(self.booking.base_amount)
             for coupon in coupons:
                 if coupon.type == CouponType.DISCOUNT:
-                    desc = f"{coupon.name} - {coupon.discount_value}折 (满{coupon.min_consumption}元)"
+                    desc = f"{coupon.name} - {coupon.discount_value}折 (满{coupon.min_consumption or 0}元)"
                 else:
-                    desc = f"{coupon.name} - 减{coupon.discount_value}元 (满{coupon.min_consumption}元)"
+                    desc = f"{coupon.name} - 减{coupon.discount_value}元 (满{coupon.min_consumption or 0}元)"
                 item = QListWidgetItem(desc)
                 item.setData(Qt.UserRole, coupon.id)
                 self.list_available.addItem(item)
+        except Exception as e:
+            pass
 
-            self.calculate()
+        self.calculate()
 
     def add_coupon(self):
         for item in self.list_available.selectedItems():
@@ -167,11 +179,13 @@ class BillingDialog(BaseDialog):
         self.calculate()
 
     def calculate(self):
-        if self.booking:
+        if not self.booking:
+            return
+        try:
             result = self.discount_service.calculate_discount(
                 self.booking.base_amount, coupon_ids=self.selected_coupons)
 
-            lines = result.calculation_steps
+            lines = list(result.calculation_steps) if result.calculation_steps else []
             lines.append("")
             lines.append("=" * 50)
             lines.append(f"基础金额: ¥{result.base_amount:.2f}")
@@ -184,12 +198,15 @@ class BillingDialog(BaseDialog):
                 lines.append("")
                 lines.append("优惠明细:")
                 for d in result.applied_discounts:
-                    lines.append(f"  [{d['apply_order']}] {d['coupon_name']} ({d['coupon_type']}): -¥{d['applied_amount']:.2f}")
+                    lines.append(f"  [{d.get('apply_order', '?')}] {d.get('coupon_name', '')} ({d.get('coupon_type', '')}): -¥{d.get('applied_amount', 0):.2f}")
 
             self.result_text.setPlainText("\n".join(lines))
             self.lbl_discount.setText(f"-¥{result.discount_amount:.2f}")
             self.lbl_final.setText(f"¥{result.final_amount:.2f}")
             self.current_result = result
+        except Exception as e:
+            self.result_text.setPlainText(f"计算出错: {str(e)}")
+            self.current_result = None
 
     def get_data(self):
         return {
@@ -198,38 +215,53 @@ class BillingDialog(BaseDialog):
         }
 
     def validate(self):
-        if self.booking and hasattr(self, 'current_result'):
-            try:
-                bill = self.bill_service.create_bill(
-                    booking_id=self.booking.id,
-                    discount_result=self.current_result
-                )
-                data = self.get_data()
-                self.bill_service.pay_bill(bill.id, data["payment_method"])
+        if not self.booking:
+            self.show_error("错误", "预订信息不存在")
+            return False
+        if not self.current_result:
+            self.show_error("错误", "请先计算优惠金额")
+            return False
+        return True
 
-                if data["print"]:
-                    print_content = self.bill_service.generate_print_content(bill.id)
-                    try:
-                        from PySide6.QtPrintSupport import QPrinter, QPrintDialog
-                        from PySide6.QtGui import QTextDocument
+    def accept(self):
+        if not self.validate():
+            return
 
-                        printer = QPrinter(QPrinter.HighResolution)
-                        printer.setPageSize(QPrinter.A4)
-                        printer.setOutputFormat(QPrinter.NativeFormat)
-                        dialog = QPrintDialog(printer, self)
-                        if dialog.exec() == QDialog.Accepted:
-                            doc = QTextDocument()
-                            doc.setPlainText(print_content)
-                            doc.print_(printer)
-                    except ImportError:
-                        pass
+        try:
+            bill = self.bill_service.create_bill(
+                booking_id=self.booking.id,
+                discount_result=self.current_result
+            )
 
-                self.show_info("成功", f"账单已生成并支付成功！\n账单号: {bill.bill_no}\n应付: ¥{bill.final_amount:.2f}")
-                return True
-            except Exception as e:
-                self.show_error("错误", str(e))
-                return False
-        return False
+            data = self.get_data()
+            self.bill_service.pay_bill(bill.id, data["payment_method"])
+
+            self.created_bill = bill
+
+            if data["print"]:
+                print_content = self.bill_service.generate_print_content(bill.id)
+                try:
+                    from PySide6.QtPrintSupport import QPrinter, QPrintDialog
+                    from PySide6.QtGui import QTextDocument
+
+                    printer = QPrinter(QPrinter.HighResolution)
+                    printer.setPageSize(QPrinter.A4)
+                    printer.setOutputFormat(QPrinter.NativeFormat)
+                    dialog = QPrintDialog(printer, self)
+                    if dialog.exec() == QDialog.Accepted:
+                        doc = QTextDocument()
+                        doc.setPlainText(print_content)
+                        doc.print_(printer)
+                except ImportError:
+                    pass
+                except Exception:
+                    pass
+
+            self.show_info("成功", f"账单已生成并支付成功！\n账单号: {bill.bill_no}\n应付: ¥{bill.final_amount:.2f}")
+            super().accept()
+        except Exception as e:
+            self.show_error("错误", str(e))
+            return
 
 
 class BillingWidget(BaseWidget):

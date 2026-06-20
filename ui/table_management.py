@@ -234,7 +234,7 @@ class TableManagementWidget(BaseWidget):
         booking_layout.addLayout(btn_booking_layout)
 
         self.booking_widget = self.create_table([
-            "ID", "桌号", "客人", "日期", "时间", "时长", "金额", "状态", "来源"
+            "ID", "桌号", "客人", "日期", "时间", "时长", "金额", "状态", "账单", "来源"
         ])
         booking_layout.addWidget(self.booking_widget)
 
@@ -271,16 +271,35 @@ class TableManagementWidget(BaseWidget):
         self.clear_table(self.booking_widget)
         booking_date = self.date_filter.date().toPython()
         bookings = self.booking_service.get_bookings_by_date(booking_date)
+
+        from modules.bill_service import BillService
+        bill_service = BillService(self.db)
+
         for booking in bookings:
             row = self.booking_widget.rowCount()
             self.booking_widget.insertRow(row)
             time_str = f"{booking.start_time.strftime('%H:%M')}-{booking.end_time.strftime('%H:%M')}"
             source = "周期生成" if booking.is_from_cycle else "手动"
+
+            bills = bill_service.get_bills_by_booking(booking.id)
+            bill_status = "未结账"
+            if bills:
+                paid = any(b.is_paid for b in bills)
+                if paid:
+                    bill_status = "已支付"
+                else:
+                    bill_status = "待支付"
+
+            display_amount = f"¥{booking.base_amount}"
+            if bills and any(b.is_paid for b in bills):
+                paid_bill = next(b for b in bills if b.is_paid)
+                display_amount = f"¥{paid_bill.final_amount}"
+
             self.set_table_row(self.booking_widget, row, [
                 booking.id, booking.table.table_number if booking.table else "",
                 booking.customer_name, booking.booking_date, time_str,
-                f"{booking.total_hours:.1f}h", f"¥{booking.base_amount}",
-                booking.status.value, source
+                f"{booking.total_hours:.1f}h", display_amount,
+                booking.status.value, bill_status, source
             ])
             status_item = self.booking_widget.item(row, 7)
             if booking.status == BookingStatus.CONFIRMED:
@@ -291,6 +310,12 @@ class TableManagementWidget(BaseWidget):
                 status_item.setForeground(QBrush(QColor("#2196f3")))
             elif booking.status == BookingStatus.CANCELLED:
                 status_item.setForeground(QBrush(QColor("#9e9e9e")))
+
+            bill_item = self.booking_widget.item(row, 8)
+            if bill_status == "已支付":
+                bill_item.setForeground(QBrush(QColor("#4caf50")))
+            elif bill_status == "待支付":
+                bill_item.setForeground(QBrush(QColor("#ff9800")))
 
     def get_selected_table_id(self):
         row = self.table_widget.currentRow()
@@ -393,14 +418,18 @@ class TableManagementWidget(BaseWidget):
             self.show_info("提示", "请选择要入住的预订")
             return
         booking = self.booking_service.get_booking(booking_id)
-        if booking and booking.status != BookingStatus.CONFIRMED:
-            self.show_error("错误", "只有已确认的预订才能入住")
+        if not booking:
+            self.show_error("错误", "预订不存在")
             return
-        if self.booking_service.check_in(booking_id):
-            self.show_info("成功", "已入住")
+        if booking.status not in [BookingStatus.PENDING, BookingStatus.CONFIRMED]:
+            self.show_error("错误", f"当前状态为「{booking.status.value}」，只有待确认或已确认的预订才能入住")
+            return
+        try:
+            self.booking_service.check_in(booking_id)
+            self.show_info("成功", "已入住，桌台状态已更新为占用中")
             self.refresh()
-        else:
-            self.show_error("错误", "入住失败")
+        except Exception as e:
+            self.show_error("错误", str(e))
 
     def checkout(self):
         booking_id = self.get_selected_booking_id()
@@ -408,12 +437,35 @@ class TableManagementWidget(BaseWidget):
             self.show_info("提示", "请选择要结账的预订")
             return
         booking = self.booking_service.get_booking(booking_id)
-        if booking and booking.bill and booking.bill.is_paid:
-            self.show_info("提示", "该预订已结账")
+        if not booking:
+            self.show_error("错误", "预订不存在")
             return
 
+        from modules.bill_service import BillService
+        bill_service = BillService(self.db)
+        existing_bill = bill_service.get_bills_by_booking(booking_id)
+        if existing_bill:
+            paid_bill = next((b for b in existing_bill if b.is_paid), None)
+            if paid_bill:
+                self.show_info("提示", f"该预订已结账（账单号：{paid_bill.bill_no}），不能重复结账")
+                return
+
+        if booking.status not in [BookingStatus.IN_PROGRESS, BookingStatus.CONFIRMED]:
+            if booking.status == BookingStatus.COMPLETED:
+                if not existing_bill or not any(b.is_paid for b in existing_bill):
+                    pass
+                else:
+                    self.show_info("提示", "该预订已完成并结账")
+                    return
+            elif booking.status == BookingStatus.CANCELLED:
+                self.show_error("错误", "该预订已取消，无法结账")
+                return
+            else:
+                self.show_error("错误", f"当前状态为「{booking.status.value}」，无法结账")
+                return
+
         from ui.billing import BillingDialog
-        tables = self.table_service.get_all_tables()
         dialog = BillingDialog(self, self.db, booking)
         if dialog.exec():
+            self.show_info("成功", "结账完成")
             self.refresh()

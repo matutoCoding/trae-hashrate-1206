@@ -21,11 +21,26 @@ class BillService:
             seq = 1
         return f"{prefix}{seq:04d}"
 
+    def has_unpaid_bill(self, booking_id: int) -> bool:
+        existing = self.db.query(Bill).filter(
+            Bill.booking_id == booking_id
+        ).first()
+        return existing is not None
+
     def create_bill(self, booking_id: int, discount_result: DiscountResult = None,
                     **kwargs) -> Bill:
         booking = self.db.query(Booking).filter(Booking.id == booking_id).first()
         if not booking:
             raise ValueError("预订不存在")
+
+        existing_bill = self.db.query(Bill).filter(
+            Bill.booking_id == booking_id
+        ).first()
+        if existing_bill:
+            if existing_bill.is_paid:
+                raise ValueError(f"该预订已生成账单（账单号：{existing_bill.bill_no}），不能重复结账")
+            else:
+                return existing_bill
 
         bill_no = self._generate_bill_no()
         base_amount = kwargs.get("base_amount", booking.base_amount)
@@ -117,6 +132,9 @@ class BillService:
         if not bill:
             return None
 
+        if bill.is_paid:
+            raise ValueError("该账单已支付")
+
         from modules.discount_service import DiscountService
         discount_service = DiscountService(self.db)
         for bd in bill.discounts:
@@ -133,9 +151,11 @@ class BillService:
         self.db.refresh(bill)
 
         booking = self.db.query(Booking).filter(Booking.id == bill.booking_id).first()
-        if booking and booking.status == BookingStatus.IN_PROGRESS:
+        if booking:
             from modules.booking_service import BookingService
-            BookingService(self.db).check_out(booking.id)
+            booking_service = BookingService(self.db)
+            if booking.status != BookingStatus.COMPLETED:
+                booking_service.check_out(booking.id)
 
         return bill
 
