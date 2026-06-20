@@ -144,13 +144,31 @@ class BillService:
                 except:
                     pass
 
+        member_discount = 0.0
+        coupon_discount = 0.0
+        discount_detail_list = []
+        for bd in sorted(bill.discounts, key=lambda x: x.apply_order or 0):
+            if bd.coupon_type == "会员折扣" or bd.coupon_id is None:
+                member_discount += bd.applied_amount or 0
+            else:
+                coupon_discount += bd.applied_amount or 0
+            discount_detail_list.append(
+                f"[{bd.apply_order}] {bd.coupon_name} ({bd.coupon_type}): -¥{bd.applied_amount:.2f}"
+            )
+        discount_detail = "\n".join(discount_detail_list)
+
         if payment_method == "会员卡" and member_id:
             from modules.member_service import MemberService
             member_service = MemberService(self.db)
-            member_service.consume(
+            member_service.consume_with_detail(
                 member_id=member_id,
                 amount=bill.final_amount,
                 bill_id=bill.id,
+                bill_no=bill.bill_no,
+                table_number=bill.table_number,
+                member_discount=member_discount,
+                coupon_discount=coupon_discount,
+                discount_detail=discount_detail,
                 description=f"账单 {bill.bill_no} 会员卡支付"
             )
             bill.member_id = member_id

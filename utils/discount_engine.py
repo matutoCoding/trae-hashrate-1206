@@ -32,6 +32,8 @@ class DiscountResult:
     base_amount: float
     discount_amount: float
     final_amount: float
+    member_discount: float = 0.0
+    coupon_discount: float = 0.0
     applied_discounts: List[dict] = field(default_factory=list)
     calculation_steps: List[str] = field(default_factory=list)
     has_negative_protection: bool = False
@@ -44,7 +46,9 @@ class DiscountCalculator:
         self.allow_negative = allow_negative
 
     def calculate(self, base_amount: float, coupons: List[CouponItem],
-                  check_date: Optional[date] = None) -> DiscountResult:
+                  check_date: Optional[date] = None,
+                  member_discount_rate: Optional[float] = None,
+                  member_level: str = "") -> DiscountResult:
         if base_amount <= 0:
             return DiscountResult(
                 base_amount=0,
@@ -56,27 +60,51 @@ class DiscountCalculator:
         check_date = check_date or date.today()
         valid_coupons = self._filter_valid_coupons(coupons, check_date, base_amount)
 
-        if not valid_coupons:
-            return DiscountResult(
-                base_amount=base_amount,
-                discount_amount=0,
-                final_amount=base_amount,
-                calculation_steps=["无可用优惠券"]
-            )
-
-        discount_coupons = [c for c in valid_coupons if c.type == CouponType.DISCOUNT]
-        deduction_coupons = [c for c in valid_coupons if c.type == CouponType.DEDUCTION]
-
         current_amount = base_amount
         total_discount = 0
         applied_discounts = []
         steps = [f"原始金额: ¥{base_amount:.2f}"]
         apply_order_num = 1
+        member_discount_total = 0
+        coupon_discount_total = 0
+
+        if member_discount_rate and 0 < member_discount_rate < 10:
+            discount_rate = member_discount_rate / 10.0
+            discounted = current_amount * discount_rate
+            member_disc = current_amount - discounted
+            member_discount_total = member_disc
+            current_amount = discounted
+            total_discount += member_disc
+            level_text = member_level or "会员"
+            applied_discounts.append({
+                "coupon_id": None,
+                "coupon_name": f"{level_text}折扣",
+                "coupon_type": "会员折扣",
+                "discount_value": member_discount_rate,
+                "applied_amount": member_disc,
+                "apply_order": apply_order_num
+            })
+            steps.append(f"[步骤{apply_order_num}] {level_text}({member_discount_rate}折): 减免 ¥{member_disc:.2f}，当前金额 ¥{current_amount:.2f}")
+            apply_order_num += 1
+
+        if not valid_coupons and member_discount_total == 0:
+            return DiscountResult(
+                base_amount=base_amount,
+                discount_amount=0,
+                final_amount=base_amount,
+                calculation_steps=["无可用优惠"],
+                member_discount=0,
+                coupon_discount=0
+            )
+
+        discount_coupons = [c for c in valid_coupons if c.type == CouponType.DISCOUNT]
+        deduction_coupons = [c for c in valid_coupons if c.type == CouponType.DEDUCTION]
 
         if self.apply_order == ApplyOrder.DISCOUNT_FIRST:
             for coupon in discount_coupons:
                 current_amount, discount = self._apply_discount_coupon(current_amount, coupon)
                 total_discount += discount
+                coupon_discount_total += discount
                 applied_discounts.append({
                     "coupon_id": coupon.id,
                     "coupon_name": coupon.name,
@@ -91,6 +119,7 @@ class DiscountCalculator:
             for coupon in deduction_coupons:
                 current_amount, discount = self._apply_deduction_coupon(current_amount, coupon)
                 total_discount += discount
+                coupon_discount_total += discount
                 applied_discounts.append({
                     "coupon_id": coupon.id,
                     "coupon_name": coupon.name,
@@ -105,6 +134,7 @@ class DiscountCalculator:
             for coupon in deduction_coupons:
                 current_amount, discount = self._apply_deduction_coupon(current_amount, coupon)
                 total_discount += discount
+                coupon_discount_total += discount
                 applied_discounts.append({
                     "coupon_id": coupon.id,
                     "coupon_name": coupon.name,
@@ -119,6 +149,7 @@ class DiscountCalculator:
             for coupon in discount_coupons:
                 current_amount, discount = self._apply_discount_coupon(current_amount, coupon)
                 total_discount += discount
+                coupon_discount_total += discount
                 applied_discounts.append({
                     "coupon_id": coupon.id,
                     "coupon_name": coupon.name,
@@ -143,6 +174,8 @@ class DiscountCalculator:
             base_amount=base_amount,
             discount_amount=round(total_discount, 2),
             final_amount=round(current_amount, 2),
+            member_discount=round(member_discount_total, 2),
+            coupon_discount=round(coupon_discount_total, 2),
             applied_discounts=applied_discounts,
             calculation_steps=steps,
             has_negative_protection=has_negative_protection

@@ -7,6 +7,7 @@ from PySide6.QtGui import QPixmap, QColor, QFont, QIcon
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database.db import init_db, SessionLocal
+from database.migrate import upgrade_database
 from utils.data_init import init_sample_data
 from ui.main_window import MainWindow
 
@@ -40,6 +41,10 @@ def main():
     try:
         init_db()
         splash.showMessage("正在初始化数据库...", Qt.AlignBottom | Qt.AlignCenter, QColor("#ecf0f1"))
+        app.processEvents()
+
+        upgrade_database()
+        splash.showMessage("正在升级数据库...", Qt.AlignBottom | Qt.AlignCenter, QColor("#ecf0f1"))
         app.processEvents()
 
         db = SessionLocal()

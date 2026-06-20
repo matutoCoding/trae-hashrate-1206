@@ -204,6 +204,20 @@ class MachineInspection(Base):
     table = relationship("MahjongTable", back_populates="inspections")
 
 
+class RechargePackage(Base):
+    __tablename__ = "recharge_packages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    recharge_amount = Column(Float, nullable=False)
+    bonus_amount = Column(Float, default=0.0)
+    description = Column(String(200))
+    is_active = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+
+
 class Member(Base):
     __tablename__ = "members"
 
@@ -213,6 +227,7 @@ class Member(Base):
     level = Column(Enum(MemberLevel), default=MemberLevel.NORMAL)
     balance = Column(Float, default=0.0)
     total_consumption = Column(Float, default=0.0)
+    total_saved = Column(Float, default=0.0)
     visit_count = Column(Integer, default=0)
     remark = Column(Text)
     is_active = Column(Boolean, default=True)
@@ -233,6 +248,13 @@ class MemberConsumption(Base):
     balance_before = Column(Float)
     balance_after = Column(Float)
     description = Column(String(200))
+    bill_no = Column(String(50))
+    table_number = Column(String(20))
+    recharge_amount = Column(Float, default=0.0)
+    bonus_amount = Column(Float, default=0.0)
+    member_discount = Column(Float, default=0.0)
+    coupon_discount = Column(Float, default=0.0)
+    discount_detail = Column(Text)
     created_at = Column(DateTime)
 
     member = relationship("Member", back_populates="consumptions")

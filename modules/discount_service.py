@@ -145,13 +145,24 @@ class DiscountService:
         return config
 
     def calculate_discount(self, base_amount: float, coupon_ids: List[int] = None,
-                           coupon_codes: List[str] = None, check_date: date = None) -> DiscountResult:
+                           coupon_codes: List[str] = None, check_date: date = None,
+                           member_id: int = None) -> DiscountResult:
         config = self.get_discount_config()
         apply_order = ApplyOrder.DISCOUNT_FIRST
         allow_negative = False
         if config:
             apply_order = ApplyOrder(config.apply_order.value)
             allow_negative = config.allow_negative
+
+        member_discount_rate = None
+        member_level = ""
+        if member_id:
+            from modules.member_service import MemberService
+            member_service = MemberService(self.db)
+            member = member_service.get_member(member_id)
+            if member:
+                member_discount_rate = member_service.get_level_discount(member.level)
+                member_level = member.level.value
 
         coupons = []
         if coupon_ids:
@@ -180,4 +191,6 @@ class DiscountService:
             ))
 
         calculator = DiscountCalculator(apply_order=apply_order, allow_negative=allow_negative)
-        return calculator.calculate(base_amount, engine_coupons, check_date)
+        return calculator.calculate(base_amount, engine_coupons, check_date,
+                                     member_discount_rate=member_discount_rate,
+                                     member_level=member_level)

@@ -125,8 +125,7 @@ class BillingDialog(BaseDialog):
         member_layout = QHBoxLayout()
         self.combo_member = QComboBox()
         self.combo_member.setMinimumHeight(32)
-        self.combo_member.setEnabled(False)
-        member_layout.addWidget(self.combo_member)
+        member_layout.addWidget(self.combo_member, 1)
         self.lbl_member_balance = QLabel("")
         self.lbl_member_balance.setStyleSheet("color: #1976d2; font-weight: bold;")
         member_layout.addWidget(self.lbl_member_balance)
@@ -166,23 +165,28 @@ class BillingDialog(BaseDialog):
                 self.list_available.addItem(item)
 
             members = self.member_service.get_all_members(only_active=True)
+            self.combo_member.addItem("不使用会员（无会员折扣）", None)
             for m in members:
-                self.combo_member.addItem(
-                    f"{m.name} ({m.phone}) 余额:¥{m.balance:.2f}",
-                    m.id
-                )
+                level_discount = self.member_service.get_level_discount(m.level)
+                level_text = m.level.value if hasattr(m.level, 'value') else str(m.level)
+                desc = f"{m.name} ({m.phone}) - {level_text}({level_discount}折) 余额:¥{m.balance:.2f}"
+                self.combo_member.addItem(desc, m.id)
 
+            self.combo_member.currentIndexChanged.connect(self.on_member_changed)
             self.calculate()
         except Exception as e:
             self.result_text.setPlainText(f"加载出错: {str(e)}")
 
     def on_payment_method_changed(self, method):
         is_member = method == "会员卡"
-        self.combo_member.setEnabled(is_member)
         if is_member:
             self._update_member_balance()
         else:
             self.lbl_member_balance.setText("")
+
+    def on_member_changed(self):
+        self._update_member_balance()
+        self.calculate()
 
     def _update_member_balance(self):
         idx = self.combo_member.currentIndex()
@@ -219,18 +223,32 @@ class BillingDialog(BaseDialog):
         self.list_selected.clear()
         self.calculate()
 
+    def _get_selected_member_id(self):
+        idx = self.combo_member.currentIndex()
+        if idx >= 0:
+            return self.combo_member.itemData(idx)
+        return None
+
     def calculate(self):
         if not self.booking:
             return
         try:
+            member_id = self._get_selected_member_id()
             result = self.discount_service.calculate_discount(
-                self.booking.base_amount, coupon_ids=self.selected_coupons)
+                self.booking.base_amount,
+                coupon_ids=self.selected_coupons,
+                member_id=member_id
+            )
 
             lines = list(result.calculation_steps) if result.calculation_steps else []
             lines.append("")
             lines.append("=" * 50)
             lines.append(f"基础金额: ¥{result.base_amount:.2f}")
-            lines.append(f"优惠金额: ¥{result.discount_amount:.2f}")
+            if hasattr(result, 'member_discount') and result.member_discount > 0:
+                lines.append(f"会员折扣: -¥{result.member_discount:.2f}")
+            if hasattr(result, 'coupon_discount') and result.coupon_discount > 0:
+                lines.append(f"优惠券折扣: -¥{result.coupon_discount:.2f}")
+            lines.append(f"优惠合计: ¥{result.discount_amount:.2f}")
             lines.append(f"最终应付: ¥{result.final_amount:.2f}")
             if result.has_negative_protection:
                 lines.append("⚠️ 已触发负值兜底校验，金额已调整为0")
@@ -258,13 +276,9 @@ class BillingDialog(BaseDialog):
             return False
 
         if self.combo_payment.currentText() == "会员卡":
-            idx = self.combo_member.currentIndex()
-            if idx < 0:
-                self.show_error("错误", "请选择会员")
-                return False
-            member_id = self.combo_member.itemData(idx)
+            member_id = self._get_selected_member_id()
             if not member_id:
-                self.show_error("错误", "请选择有效的会员")
+                self.show_error("错误", "请选择会员")
                 return False
             member = self.member_service.get_member(member_id)
             if not member:
@@ -429,6 +443,14 @@ class BillingWidget(BaseWidget):
         layout.setSpacing(8)
 
         filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("视图模式:"))
+        self.combo_view_mode = QComboBox()
+        self.combo_view_mode.addItems(["日视图", "周视图", "月视图"])
+        self.combo_view_mode.setMinimumHeight(32)
+        self.combo_view_mode.currentTextChanged.connect(self.on_view_mode_changed)
+        filter_layout.addWidget(self.combo_view_mode)
+
+        filter_layout.addSpacing(20)
         filter_layout.addWidget(QLabel("统计周期:"))
         self.combo_period = QComboBox()
         self.combo_period.addItems(["近7天", "近30天", "本月", "上月", "自定义"])
@@ -451,6 +473,8 @@ class BillingWidget(BaseWidget):
 
         self.btn_stats = self.create_button("📊 生成统计", callback=self.generate_statistics)
         filter_layout.addWidget(self.btn_stats)
+        self.btn_export = self.create_button("📥 导出Excel", callback=self.export_excel)
+        filter_layout.addWidget(self.btn_export)
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
 
@@ -470,15 +494,15 @@ class BillingWidget(BaseWidget):
 
         stats_splitter = QSplitter(Qt.Horizontal)
 
-        daily_group = QGroupBox("每日明细")
+        daily_group = QGroupBox("周期明细")
         daily_layout = QVBoxLayout(daily_group)
-        self.daily_table = self.create_table([
-            "日期", "账单数", "营业额", "优惠额", "实收额", "使用时长", "客单价"
+        self.period_table = self.create_table([
+            "周期", "账单数", "营业额", "优惠额", "实收额", "使用时长", "客单价"
         ])
-        daily_layout.addWidget(self.daily_table)
+        daily_layout.addWidget(self.period_table)
         stats_splitter.addWidget(daily_group)
 
-        payment_group = QGroupBox("按支付方式分组")
+        payment_group = QGroupBox("支付方式占比")
         payment_layout = QVBoxLayout(payment_group)
         self.payment_table = self.create_table([
             "支付方式", "笔数", "金额", "时长", "占比"
@@ -489,7 +513,12 @@ class BillingWidget(BaseWidget):
         stats_splitter.setSizes([500, 300])
         layout.addWidget(stats_splitter)
 
+        self.current_stats_data = None
         return tab
+
+    def on_view_mode_changed(self, text):
+        if self.current_stats_data:
+            self._update_period_display()
 
     def on_period_changed(self, text):
         today = QDate.currentDate()
@@ -512,6 +541,7 @@ class BillingWidget(BaseWidget):
         end_date = self.stats_date_end.date().toPython()
 
         stats = self.bill_service.get_statistics(start_date, end_date)
+        self.current_stats_data = stats
 
         self.lbl_stat_bills.setText(f"账单数: {stats['bill_count']}")
         self.lbl_stat_base.setText(f"营业额: ¥{stats['total_base']:.2f}")
@@ -520,16 +550,7 @@ class BillingWidget(BaseWidget):
         self.lbl_stat_hours.setText(f"使用时长: {stats['total_hours']:.1f}h")
         self.lbl_stat_avg.setText(f"客单价: ¥{stats['avg_per_bill']:.2f}")
 
-        self.clear_table(self.daily_table)
-        for ds in sorted(stats["by_date"].keys()):
-            d = stats["by_date"][ds]
-            avg = round(d["final"] / d["count"], 2) if d["count"] > 0 else 0
-            row = self.daily_table.rowCount()
-            self.daily_table.insertRow(row)
-            self.set_table_row(self.daily_table, row, [
-                ds, d["count"], f"¥{d['base']:.2f}", f"¥{d['discount']:.2f}",
-                f"¥{d['final']:.2f}", f"{d['hours']:.1f}h", f"¥{avg:.2f}"
-            ])
+        self._update_period_display()
 
         self.clear_table(self.payment_table)
         total_amount = stats["total_final"] if stats["total_final"] > 0 else 1
@@ -541,6 +562,239 @@ class BillingWidget(BaseWidget):
                 method, data["count"], f"¥{data['amount']:.2f}",
                 f"{data['hours']:.1f}h", f"{pct}%"
             ])
+
+    def _update_period_display(self):
+        if not self.current_stats_data:
+            return
+
+        view_mode = self.combo_view_mode.currentText()
+        by_date = self.current_stats_data["by_date"]
+
+        if view_mode == "日视图":
+            self._display_daily_view(by_date)
+        elif view_mode == "周视图":
+            self._display_weekly_view(by_date)
+        elif view_mode == "月视图":
+            self._display_monthly_view(by_date)
+
+    def _display_daily_view(self, by_date):
+        self.clear_table(self.period_table)
+        for ds in sorted(by_date.keys()):
+            d = by_date[ds]
+            avg = round(d["final"] / d["count"], 2) if d["count"] > 0 else 0
+            row = self.period_table.rowCount()
+            self.period_table.insertRow(row)
+            self.set_table_row(self.period_table, row, [
+                ds, d["count"], f"¥{d['base']:.2f}", f"¥{d['discount']:.2f}",
+                f"¥{d['final']:.2f}", f"{d['hours']:.1f}h", f"¥{avg:.2f}"
+            ])
+
+    def _display_weekly_view(self, by_date):
+        self.clear_table(self.period_table)
+        from datetime import timedelta as td
+        weeks = {}
+        for ds in sorted(by_date.keys()):
+            d = date.fromisoformat(ds)
+            monday = d - td(days=d.weekday())
+            sunday = monday + td(days=6)
+            week_key = f"{monday.isoformat()} ~ {sunday.isoformat()}"
+            if week_key not in weeks:
+                weeks[week_key] = {"count": 0, "base": 0.0, "discount": 0.0,
+                                    "final": 0.0, "hours": 0.0}
+            for k in ["count", "base", "discount", "final", "hours"]:
+                weeks[week_key][k] += by_date[ds][k]
+
+        for week_key in sorted(weeks.keys()):
+            w = weeks[week_key]
+            avg = round(w["final"] / w["count"], 2) if w["count"] > 0 else 0
+            row = self.period_table.rowCount()
+            self.period_table.insertRow(row)
+            self.set_table_row(self.period_table, row, [
+                week_key, w["count"], f"¥{w['base']:.2f}", f"¥{w['discount']:.2f}",
+                f"¥{w['final']:.2f}", f"{w['hours']:.1f}h", f"¥{avg:.2f}"
+            ])
+
+    def _display_monthly_view(self, by_date):
+        self.clear_table(self.period_table)
+        months = {}
+        for ds in sorted(by_date.keys()):
+            month_key = ds[:7]
+            if month_key not in months:
+                months[month_key] = {"count": 0, "base": 0.0, "discount": 0.0,
+                                      "final": 0.0, "hours": 0.0}
+            for k in ["count", "base", "discount", "final", "hours"]:
+                months[month_key][k] += by_date[ds][k]
+
+        for month_key in sorted(months.keys()):
+            m = months[month_key]
+            avg = round(m["final"] / m["count"], 2) if m["count"] > 0 else 0
+            row = self.period_table.rowCount()
+            self.period_table.insertRow(row)
+            self.set_table_row(self.period_table, row, [
+                month_key, m["count"], f"¥{m['base']:.2f}", f"¥{m['discount']:.2f}",
+                f"¥{m['final']:.2f}", f"{m['hours']:.1f}h", f"¥{avg:.2f}"
+            ])
+
+    def export_excel(self):
+        if not self.current_stats_data:
+            self.show_info("提示", "请先生成统计数据")
+            return
+
+        try:
+            from PySide6.QtWidgets import QFileDialog
+            import os
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+            default_name = f"营业报表_{self.stats_date_start.date().toString('yyyyMMdd')}-{self.stats_date_end.date().toString('yyyyMMdd')}.xlsx"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "导出Excel报表", default_name, "Excel文件 (*.xlsx)"
+            )
+            if not file_path:
+                return
+
+            stats = self.current_stats_data
+            wb = Workbook()
+
+            ws = wb.active
+            ws.title = "营业报表"
+
+            header_font = Font(bold=True, size=12, color="FFFFFF")
+            header_fill = PatternFill(start_color="1976D2", end_color="1976D2", fill_type="solid")
+            center_align = Alignment(horizontal="center", vertical="center")
+            thin_border = Border(
+                left=Side(style='thin'), right=Side(style='thin'),
+                top=Side(style='thin'), bottom=Side(style='thin')
+            )
+
+            ws.merge_cells('A1:G1')
+            ws['A1'] = "茶楼麻将房营业报表"
+            ws['A1'].font = Font(bold=True, size=16)
+            ws['A1'].alignment = center_align
+
+            ws['A2'] = f"统计周期: {stats['start_date']} 至 {stats['end_date']}"
+            ws.merge_cells('A2:G2')
+            ws['A2'].alignment = center_align
+
+            ws['A4'] = "汇总数据"
+            ws['A4'].font = Font(bold=True, size=12)
+
+            summary_labels = ["账单数", "营业额", "优惠额", "实收额", "使用时长", "客单价"]
+            summary_values = [
+                stats['bill_count'],
+                f"¥{stats['total_base']:.2f}",
+                f"¥{stats['total_discount']:.2f}",
+                f"¥{stats['total_final']:.2f}",
+                f"{stats['total_hours']:.1f} 小时",
+                f"¥{stats['avg_per_bill']:.2f}"
+            ]
+            for i, (label, value) in enumerate(zip(summary_labels, summary_values)):
+                ws.cell(row=5, column=i + 1, value=label)
+                ws.cell(row=5, column=i + 1).font = Font(bold=True)
+                ws.cell(row=6, column=i + 1, value=value)
+
+            ws['A8'] = "支付方式占比"
+            ws['A8'].font = Font(bold=True, size=12)
+
+            pay_headers = ["支付方式", "笔数", "金额", "使用时长", "占比"]
+            for i, h in enumerate(pay_headers):
+                cell = ws.cell(row=9, column=i + 1, value=h)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = center_align
+                cell.border = thin_border
+
+            total_final = stats['total_final'] if stats['total_final'] > 0 else 1
+            row_idx = 10
+            for method, data in sorted(stats["by_payment"].items()):
+                pct = round(data["amount"] / total_final * 100, 1)
+                values = [method, data["count"], f"¥{data['amount']:.2f}",
+                          f"{data['hours']:.1f}h", f"{pct}%"]
+                for i, v in enumerate(values):
+                    cell = ws.cell(row=row_idx, column=i + 1, value=v)
+                    cell.border = thin_border
+                    cell.alignment = center_align
+                row_idx += 1
+
+            row_idx += 2
+            ws.cell(row=row_idx, column=1, value="周期明细").font = Font(bold=True, size=12)
+            row_idx += 1
+
+            detail_headers = ["周期", "账单数", "营业额", "优惠额", "实收额", "使用时长", "客单价"]
+            for i, h in enumerate(detail_headers):
+                cell = ws.cell(row=row_idx, column=i + 1, value=h)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = center_align
+                cell.border = thin_border
+            row_idx += 1
+
+            by_date = stats["by_date"]
+            view_mode = self.combo_view_mode.currentText()
+            if view_mode == "日视图":
+                items = sorted(by_date.keys())
+                for ds in items:
+                    d = by_date[ds]
+                    avg = round(d["final"] / d["count"], 2) if d["count"] > 0 else 0
+                    values = [ds, d["count"], f"¥{d['base']:.2f}", f"¥{d['discount']:.2f}",
+                              f"¥{d['final']:.2f}", f"{d['hours']:.1f}h", f"¥{avg:.2f}"]
+                    for i, v in enumerate(values):
+                        cell = ws.cell(row=row_idx, column=i + 1, value=v)
+                        cell.border = thin_border
+                        cell.alignment = center_align
+                    row_idx += 1
+            elif view_mode == "周视图":
+                from datetime import timedelta as td
+                weeks = {}
+                for ds in sorted(by_date.keys()):
+                    d = date.fromisoformat(ds)
+                    monday = d - td(days=d.weekday())
+                    sunday = monday + td(days=6)
+                    week_key = f"{monday.isoformat()} ~ {sunday.isoformat()}"
+                    if week_key not in weeks:
+                        weeks[week_key] = {"count": 0, "base": 0.0, "discount": 0.0,
+                                            "final": 0.0, "hours": 0.0}
+                    for k in ["count", "base", "discount", "final", "hours"]:
+                        weeks[week_key][k] += by_date[ds][k]
+                for week_key in sorted(weeks.keys()):
+                    w = weeks[week_key]
+                    avg = round(w["final"] / w["count"], 2) if w["count"] > 0 else 0
+                    values = [week_key, w["count"], f"¥{w['base']:.2f}", f"¥{w['discount']:.2f}",
+                              f"¥{w['final']:.2f}", f"{w['hours']:.1f}h", f"¥{avg:.2f}"]
+                    for i, v in enumerate(values):
+                        cell = ws.cell(row=row_idx, column=i + 1, value=v)
+                        cell.border = thin_border
+                        cell.alignment = center_align
+                    row_idx += 1
+            elif view_mode == "月视图":
+                months = {}
+                for ds in sorted(by_date.keys()):
+                    month_key = ds[:7]
+                    if month_key not in months:
+                        months[month_key] = {"count": 0, "base": 0.0, "discount": 0.0,
+                                              "final": 0.0, "hours": 0.0}
+                    for k in ["count", "base", "discount", "final", "hours"]:
+                        months[month_key][k] += by_date[ds][k]
+                for month_key in sorted(months.keys()):
+                    m = months[month_key]
+                    avg = round(m["final"] / m["count"], 2) if m["count"] > 0 else 0
+                    values = [month_key, m["count"], f"¥{m['base']:.2f}", f"¥{m['discount']:.2f}",
+                              f"¥{m['final']:.2f}", f"{m['hours']:.1f}h", f"¥{avg:.2f}"]
+                    for i, v in enumerate(values):
+                        cell = ws.cell(row=row_idx, column=i + 1, value=v)
+                        cell.border = thin_border
+                        cell.alignment = center_align
+                    row_idx += 1
+
+            for col in range(1, 8):
+                ws.column_dimensions[chr(64 + col)].width = 18
+
+            wb.save(file_path)
+            self.show_info("成功", f"报表已导出到:\n{file_path}")
+        except ImportError:
+            self.show_error("错误", "导出Excel需要安装 openpyxl 库")
+        except Exception as e:
+            self.show_error("错误", f"导出失败: {str(e)}")
 
     def refresh(self):
         self.refresh_bills()
